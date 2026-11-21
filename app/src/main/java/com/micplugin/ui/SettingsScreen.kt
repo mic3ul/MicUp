@@ -91,14 +91,14 @@ fun SettingsScreen(navController: NavController, vm: AudioViewModel = hiltViewMo
                 }
                 if (shizukuState == ShizukuState.READY) {
                     Text(
-                        "Shizuku active — ALSA loopback and appops routing available.",
+                        "Shizuku is active, but this build does not yet connect processed PCM to an Android microphone input. See the PCM bridge integration notes.",
                         fontSize = 10.sp, color = StudioColors.TextMuted, lineHeight = 14.sp,
                     )
                 }
             }
 
             // ── Virtual Mic ───────────────────────────────────────────────────
-            SettingsSection("Virtual Microphone") {
+            SettingsSection("External Audio Routing") {
                 Surface(
                     shape  = RoundedCornerShape(7.dp),
                     color  = Color(tier.badgeColorHex).copy(alpha = 0.05f),
