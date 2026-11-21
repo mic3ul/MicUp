@@ -139,8 +139,18 @@ class AudioProcessingService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        audioEngine.setMonitorCallback { buf: FloatArray, size: Int -> SoftwareLoopback.writeProcessed(buf, size) }
-        audioEngine.start()
+        audioEngine.setMonitorCallback { buf: FloatArray, size: Int ->
+            SoftwareLoopback.writeProcessed(buf, size)
+            ProcessedAudioBridge.writeProcessed(buf, size)
+        }
+        val started = audioEngine.start()
+        ProcessedAudioBridge.setEngineState(
+            active = started,
+            sampleRate = audioEngine.status.value.sampleRate,
+        )
+        if (!started) {
+            android.util.Log.e("MicUp.Service", "Audio engine failed to start")
+        }
         startStatusUpdates()
         if (!SoftwareLoopback.isRunning) SoftwareLoopback.start(this)
         return START_STICKY
@@ -149,6 +159,7 @@ class AudioProcessingService : Service() {
     override fun onDestroy() {
         updatesStarted = false
         scope.cancel()
+        ProcessedAudioBridge.setEngineState(active = false)
         audioEngine.stop()
         SoftwareLoopback.stop()
         wakeLock?.release()
