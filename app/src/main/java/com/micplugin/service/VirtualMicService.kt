@@ -19,16 +19,16 @@ enum class VirtualMicTier {
     VOIP_STREAM, MEDIA_PROJECTION, SHIZUKU_ADB, ROOT_MAGISK;
 
     val displayName: String get() = when (this) {
-        VOIP_STREAM      -> "VoIP Compatible"
-        MEDIA_PROJECTION -> "Software Loopback"
-        SHIZUKU_ADB      -> "Shizuku — ADB Level"
-        ROOT_MAGISK      -> "Root Mode — System-Wide"
+        VOIP_STREAM      -> "Local DSP Monitor"
+        MEDIA_PROJECTION -> "MediaProjection (not mic injection)"
+        SHIZUKU_ADB      -> "Shizuku ALSA (not implemented)"
+        ROOT_MAGISK      -> "Root / Magisk (not configured)"
     }
     val description: String get() = when (this) {
-        VOIP_STREAM      -> "Processed audio routes through VoIP stream. Works with Meet, Teams, Discord, Zoom."
-        MEDIA_PROJECTION -> "Uses system-wide VOICE_COMMUNICATION injection. Works on Android 14+ to override default mic in most apps."
-        SHIZUKU_ADB      -> "Uses Shizuku (ADB-level) to load ALSA loopback and route processed audio. Apps see 'MicPlugin Virtual Mic' without full root."
-        ROOT_MAGISK      -> "Magisk module creates /dev/snd/virtual_mic via ALSA loopback. All apps see MicPlugin as a separate hardware device."
+        VOIP_STREAM      -> "Processes the device microphone and plays the result through MicUp's local monitor. It does not replace another app's microphone."
+        MEDIA_PROJECTION -> "MediaProjection captures eligible playback; it cannot replace WhatsApp's microphone input."
+        SHIZUKU_ADB      -> "Experimental only. This build has no PCM writer connected to an ALSA capture device or Android audio input policy."
+        ROOT_MAGISK      -> "Root alone does not create a virtual microphone. This fork has no verified Magisk module or AudioPolicy integration."
     }
     val badgeColorHex: Long get() = when (this) {
         VOIP_STREAM      -> 0xFF3DFCACL
@@ -149,22 +149,17 @@ class VirtualMicService @Inject constructor(
     }
 
     private fun detectAndSetBestTier() {
-        _activeTier.value = when {
-            isRooted()                       -> VirtualMicTier.ROOT_MAGISK
-            shizukuManager.isReady           -> VirtualMicTier.SHIZUKU_ADB
-            Build.VERSION.SDK_INT >= 34      -> VirtualMicTier.MEDIA_PROJECTION
-            else                             -> VirtualMicTier.VOIP_STREAM
-        }
-        Log.i(TAG, "Virtual mic tier: ${_activeTier.value}")
+        // Only the local monitor path is implemented and verified in this build.
+        // Root/Shizuku presence does not prove an Android input route exists.
+        _activeTier.value = VirtualMicTier.VOIP_STREAM
+        Log.i(TAG, "Audio route: local processed monitor (no system mic injection)")
     }
 
     /** Called after Shizuku permission is granted so we re-evaluate tier */
     fun onShizukuReady() {
-        if (_activeTier.value == VirtualMicTier.VOIP_STREAM ||
-            _activeTier.value == VirtualMicTier.MEDIA_PROJECTION) {
-            _activeTier.value = VirtualMicTier.SHIZUKU_ADB
-            activateShizukuRouting()
-        }
+        // Shizuku is an execution/permission mechanism, not a virtual microphone.
+        // Do not advertise an unverified ALSA path as active.
+        Log.i(TAG, "Shizuku is ready; system microphone injection remains unavailable")
     }
 
     /**
@@ -197,20 +192,13 @@ class VirtualMicService @Inject constructor(
      * Returns null if the tier is available, or a human-readable reason string if not.
      */
     fun checkTierAvailability(tier: VirtualMicTier): String? = when (tier) {
-        VirtualMicTier.VOIP_STREAM      -> null
-        VirtualMicTier.MEDIA_PROJECTION -> if (Build.VERSION.SDK_INT >= 29) null
-                                           else "Requires Android 10+"
-        VirtualMicTier.SHIZUKU_ADB      -> when (shizukuManager.state.value) {
-            ShizukuState.READY       -> if (shizukuManager.hasAlsaLoopbackSupport()) null
-                                         else "Shizuku is ready, but this device's kernel has no ALSA loopback (snd-aloop) support — use Software Loopback instead"
-            ShizukuState.NEED_GRANT  -> "Shizuku is running but permission hasn't been granted — tap Grant in Settings"
-            ShizukuState.UNAVAILABLE -> "Shizuku is not running — start it via Wireless Debugging or ADB"
-        }
-        VirtualMicTier.ROOT_MAGISK      -> when {
-            !isRooted()                        -> "Device is not rooted"
-            !hasAlsaLoopbackSupportRoot()       -> "Rooted, but no ALSA loopback device found — install the module and reboot, or this chipset's kernel may not support snd-aloop at all"
-            else                                -> null
-        }
+        VirtualMicTier.VOIP_STREAM -> null
+        VirtualMicTier.MEDIA_PROJECTION ->
+            "Unavailable: MediaProjection captures playback, not microphone input from MicUp."
+        VirtualMicTier.SHIZUKU_ADB ->
+            "Unavailable: this build has no end-to-end PCM writer to ALSA loopback and no Android input-device registration."
+        VirtualMicTier.ROOT_MAGISK ->
+            "Unavailable: this fork does not include a verified Magisk module or AudioPolicy/device integration."
     }
 
     /**
@@ -227,37 +215,7 @@ class VirtualMicService @Inject constructor(
     }
 
     fun requestUpgrade(activity: Activity) {
-        when (_activeTier.value) {
-            VirtualMicTier.VOIP_STREAM -> {
-                when {
-                    shizukuManager.state.value == ShizukuState.NEED_GRANT -> {
-                        shizukuManager.requestPermission()
-                    }
-                    shizukuManager.isReady -> {
-                        _activeTier.value = VirtualMicTier.SHIZUKU_ADB
-                        activateShizukuRouting()
-                    }
-                    Build.VERSION.SDK_INT >= 34 -> {
-                        _activeTier.value = VirtualMicTier.MEDIA_PROJECTION
-                    }
-                }
-            }
-            VirtualMicTier.MEDIA_PROJECTION -> {
-                if (shizukuManager.isReady) {
-                    _activeTier.value = VirtualMicTier.SHIZUKU_ADB
-                    activateShizukuRouting()
-                } else if (shizukuManager.state.value == ShizukuState.NEED_GRANT) {
-                    shizukuManager.requestPermission()
-                }
-            }
-            VirtualMicTier.SHIZUKU_ADB -> {
-                if (isRooted()) {
-                    installMagiskModule(activity)
-                    _activeTier.value = VirtualMicTier.ROOT_MAGISK
-                }
-            }
-            VirtualMicTier.ROOT_MAGISK -> {}
-        }
+        Log.i(TAG, "Privileged audio routing is disabled until an end-to-end route is implemented and verified")
     }
 
     private fun installMagiskModule(context: Context) {
