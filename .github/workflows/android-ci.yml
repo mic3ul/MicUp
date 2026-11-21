@@ -35,6 +35,9 @@ jobs:
             SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -path '*/bin/sdkmanager' -type f | sort -V | tail -n 1)"
           fi
           test -x "$SDKMANAGER"
+          # sdkmanager exits after accepting the final license; the "yes" process
+          # may receive SIGPIPE when its stdin closes. Do not fail on that pipe.
+          set +o pipefail
           yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses
 
       - name: Install Android SDK components
