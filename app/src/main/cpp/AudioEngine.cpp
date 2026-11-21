@@ -580,14 +580,6 @@ Java_com_micplugin_audio_OboeEngine_nativeGetFramesPerBurst(JNIEnv*, jobject, jl
 }
 
 JNIEXPORT void JNICALL
-Java_com_micplugin_audio_OboeEngine_nativeSetInjectionMode(
-    JNIEnv*, jobject, jlong handle, jboolean enabled) {
-    auto* engine = reinterpret_cast<AudioEngine*>(handle);
-    engine->params().injectionMode.store(enabled == JNI_TRUE, std::memory_order_relaxed);
-    LOGI("Injection mode: %s", enabled ? "ON (Shizuku/Root)" : "OFF (software loopback)");
-}
-
-JNIEXPORT void JNICALL
 Java_com_micplugin_audio_OboeEngine_nativeSetInputDevice(
     JNIEnv*, jobject, jlong handle, jint deviceId) {
     auto* engine = reinterpret_cast<micplugin::AudioEngine*>(handle);
