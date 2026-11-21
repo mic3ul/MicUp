@@ -89,10 +89,6 @@ struct EffectParams {
     // Master bypass
     std::atomic<bool>  masterBypass{false};
 
-    // Injection mode: true = Shizuku/Root tier, let audio out of native stream
-    //                false = software loopback tier, zero native output (Kotlin handles monitor)
-    std::atomic<bool>  injectionMode{false};
-
     // Monitoring now handled in Kotlin via JNI callback — param 98 unused
 
     EffectParams() {
