@@ -100,12 +100,7 @@ void BiquadFilter::setHighShelf(float fc, float gainDb, float sr) {
 
 // ─── AudioEngine ─────────────────────────────────────────────────────────────
 AudioEngine::AudioEngine() {
-    // Init Hann window for pitch shifter
-    for (int i = 0; i < kGrainSize; i++) {
-        pitchWindow_[i] = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / kGrainSize));
-    }
-    std::fill(pitchIn_,  pitchIn_  + kGrainSize*2, 0.0f);
-    std::fill(pitchOut_, pitchOut_ + kGrainSize*2, 0.0f);
+    std::fill(pitchIn_, pitchIn_ + kPitchBufferSize, 0.0f);
 }
 
 AudioEngine::~AudioEngine() {
@@ -423,28 +418,59 @@ void AudioEngine::dsp_reverb(float* buf, int32_t frames) {
     }
 }
 
-// ─── Granular Pitch Shifter (OLA / time-stretch) ─────────────────────────────
+// ─── Dual-head granular pitch shifter ────────────────────────────────────────
+// Two overlapping delay heads move at a controlled delay slope. Their Hann
+// windows crossfade at each wrap, avoiding the hard read-pointer resets of a
+// tape-speed shifter. Duration stays unchanged; modest shifts retain a natural
+// voice character without the metallic phase-vocoder artifacts of this light DSP.
 void AudioEngine::dsp_pitchShift(float* buf, int32_t frames) {
-    float semitones = params_.pitchSemitones.load(std::memory_order_relaxed);
-    float rate      = std::pow(2.0f, semitones / 12.0f); // playback rate
+    const float semitones = std::clamp(
+        params_.pitchSemitones.load(std::memory_order_relaxed), -6.0f, 6.0f);
+    const float ratio = std::pow(2.0f, semitones / 12.0f);
+    const float delta = std::abs(1.0f - ratio);
+    const float maxDelay = delta * static_cast<float>(kGrainSize);
 
-    for (int i = 0; i < frames; i++) {
-        // Write input
-        pitchIn_[pitchWritePos_ % (kGrainSize*2)] = buf[i];
-        pitchWritePos_++;
+    auto readDelayed = [this](float delaySamples) -> float {
+        const double readPosition =
+            static_cast<double>(pitchWritePos_) - static_cast<double>(delaySamples);
+        const auto base = static_cast<int64_t>(std::floor(readPosition));
+        const float fraction = static_cast<float>(readPosition - std::floor(readPosition));
+        constexpr int64_t size = kPitchBufferSize;
+        int64_t wrapped = base % size;
+        if (wrapped < 0) wrapped += size;
+        const int index0 = static_cast<int>(wrapped);
+        const int index1 = (index0 + 1) & (kPitchBufferSize - 1);
+        const float a = pitchIn_[index0];
+        const float b = pitchIn_[index1];
+        return a + (b - a) * fraction;
+    };
 
-        // Read at variable rate (linear interpolation)
-        int   ri   = (int)pitchReadFrac_;
-        float frac = pitchReadFrac_ - ri;
-        int   i0   = ri % (kGrainSize*2);
-        int   i1   = (ri+1) % (kGrainSize*2);
-        buf[i]      = pitchIn_[i0] * (1.0f - frac) + pitchIn_[i1] * frac;
+    for (int i = 0; i < frames; ++i) {
+        pitchIn_[static_cast<int>(pitchWritePos_ & (kPitchBufferSize - 1))] = buf[i];
 
-        pitchReadFrac_ += rate;
-        // Keep read pointer within 1 grain of write (latency = 1 grain)
-        float lag = pitchWritePos_ - pitchReadFrac_;
-        if (lag > kGrainSize*2 - 1) pitchReadFrac_ = pitchWritePos_ - kGrainSize;
-        if (lag < 1)               pitchReadFrac_ = pitchWritePos_ - kGrainSize;
+        // Keep the unshifted path bit-transparent while still warming the ring.
+        if (delta < 0.0005f) {
+            ++pitchWritePos_;
+            continue;
+        }
+
+        const float phaseA =
+            static_cast<float>(pitchWritePos_ & (kGrainSize - 1)) /
+            static_cast<float>(kGrainSize);
+        float phaseB = phaseA + 0.5f;
+        if (phaseB >= 1.0f) phaseB -= 1.0f;
+
+        const float windowA = 0.5f - 0.5f * std::cos(2.0f * static_cast<float>(M_PI) * phaseA);
+        const float windowB = 1.0f - windowA;
+
+        // d(delay)/dt = 1 - pitchRatio. The read head therefore advances
+        // at pitchRatio while the output timeline remains locked to input.
+        const bool shiftDown = ratio < 1.0f;
+        const float delayA = 2.0f + maxDelay * (shiftDown ? phaseA : 1.0f - phaseA);
+        const float delayB = 2.0f + maxDelay * (shiftDown ? phaseB : 1.0f - phaseB);
+
+        buf[i] = windowA * readDelayed(delayA) + windowB * readDelayed(delayB);
+        ++pitchWritePos_;
     }
 }
 
