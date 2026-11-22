@@ -184,6 +184,13 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
                 if (!runtimeDecoder.setReadOnly()) {
                     throw new IllegalStateException("Could not mark the native decoder read-only.");
                 }
+
+                // Resolve every class used by JNI_OnLoad before loading the native library.
+                Class.forName("com.facebook.superpack.AssetDecompressor");
+                Class.forName("com.facebook.superpack.AssetDecompressionException");
+                Class.forName("com.whatsapp.superpack.WhatsAppObiInputStream");
+                Class.forName("com.whatsapp.superpack.WhatsAppOpenboxArchive");
+
                 String stablePath = runtimeDecoder.getCanonicalPath();
                 System.load(stablePath);
                 loadedDecoderPath = stablePath;
