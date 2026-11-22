@@ -250,15 +250,12 @@ private:
     CombFilter   combs_[4] = {CombFilter(1116),CombFilter(1188),CombFilter(1277),CombFilter(1356)};
     AllpassFilter aps_[2]  = {AllpassFilter(556), AllpassFilter(441)};
 
-    // ─ Pitch shifter state ─
-    static constexpr int kGrainSize = 2048;
-    static constexpr int kHopOut    = 512;
-    float pitchIn_[kGrainSize*2]{};
-    float pitchOut_[kGrainSize*2]{};
-    float pitchWindow_[kGrainSize]{};
-    int   pitchWritePos_  = 0;
-    float pitchReadFrac_  = 0.0f;
-    // pitchRateCache_ removed (unused)
+    // ─ Dual-head granular pitch shifter state ─
+    // Power-of-two sizes keep ring-buffer indexing cheap on the audio thread.
+    static constexpr int kGrainSize = 4096;
+    static constexpr int kPitchBufferSize = kGrainSize * 2;
+    float pitchIn_[kPitchBufferSize]{};
+    uint64_t pitchWritePos_ = 0;
 };
 
 } // namespace micplugin
