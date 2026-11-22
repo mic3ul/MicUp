@@ -30,6 +30,7 @@ FetchContent_MakeAvailable(lv2_headers)
 set(SOUNDSTRETCH OFF CACHE BOOL "Do not build the command-line utility" FORCE)
 set(SOUNDTOUCH_DLL OFF CACHE BOOL "Do not build the optional DLL wrapper" FORCE)
 set(OPENMP OFF CACHE BOOL "Keep the audio processor single-threaded" FORCE)
+set(BUILD_SHARED_LIBS ON CACHE BOOL "Keep LGPL SoundTouch replaceable at runtime" FORCE)
 FetchContent_Declare(
     soundtouch
     GIT_REPOSITORY https://github.com/silvansky/soundtouch.git
