@@ -25,6 +25,20 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(lv2_headers)
 
+# ─── SoundTouch: speech-oriented real-time pitch shifting ─────────────────────
+# Pin an exact upstream mirror commit so builds remain reproducible.
+set(SOUNDSTRETCH OFF CACHE BOOL "Do not build the command-line utility" FORCE)
+set(SOUNDTOUCH_DLL OFF CACHE BOOL "Do not build the optional DLL wrapper" FORCE)
+set(OPENMP OFF CACHE BOOL "Keep the audio processor single-threaded" FORCE)
+FetchContent_Declare(
+    soundtouch
+    GIT_REPOSITORY https://github.com/silvansky/soundtouch.git
+    GIT_TAG        b8e2a5f3f04483691962ab1a36ffa166abdcd675
+    GIT_SHALLOW    FALSE
+    GIT_PROGRESS   FALSE
+)
+FetchContent_MakeAvailable(soundtouch)
+
 # VST3 headers bundled locally — no FetchContent needed
 
 
@@ -61,6 +75,7 @@ target_compile_options(micplugin_native PRIVATE
 
 target_link_libraries(micplugin_native
     oboe::oboe
+    SoundTouch
     log
     android
     dl        # dlopen for plugin loading
