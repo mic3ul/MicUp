@@ -1,5 +1,6 @@
 package com.micplugin.ui
 
+import android.content.Intent
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -309,6 +310,18 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
             Icon(Icons.Default.Add, null, tint = StudioColors.Accent)
             Spacer(Modifier.width(6.dp))
             Text("Add Plugin", color = StudioColors.Accent)
+        }
+
+        OutlinedButton(
+            onClick = {
+                context.startActivity(
+                    Intent(context, com.micplugin.debug.WhatsAppSuperpackInspectorActivity::class.java)
+                )
+            },
+            modifier = Modifier.fillMaxWidth(),
+            border = BorderStroke(1.dp, StudioColors.AccentDim),
+        ) {
+            Text("Extract WhatsApp Native Libraries", color = StudioColors.Accent)
         }
 
         Spacer(Modifier.height(20.dp))
