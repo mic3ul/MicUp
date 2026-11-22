@@ -177,7 +177,13 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
             }
             File runtimeDecoder = new File(runtimeDir, "libsuperpack.so");
             if (loadedDecoderPath == null) {
+                if (runtimeDecoder.exists() && !runtimeDecoder.setWritable(true, false)) {
+                    throw new IllegalStateException("Cannot prepare the private decoder file for replacement.");
+                }
                 copyFile(decoder, runtimeDecoder);
+                if (!runtimeDecoder.setReadOnly()) {
+                    throw new IllegalStateException("Could not mark the native decoder read-only.");
+                }
                 String stablePath = runtimeDecoder.getCanonicalPath();
                 System.load(stablePath);
                 loadedDecoderPath = stablePath;
@@ -185,7 +191,7 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
             } else if (!decoderHash.equals(loadedDecoderSha256)) {
                 throw new IllegalStateException(
                         "A different Superpack decoder is already loaded in this MicUp process. "
-                        + "Close and reopen MicUp before inspecting a different WhatsApp build.");
+                        + "Force-stop MicUp and reopen it before inspecting a different WhatsApp build.");
             }
 
             int nativeArchitecture = AssetDecompressor.get_architecture();
