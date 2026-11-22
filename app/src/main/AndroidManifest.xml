@@ -103,6 +103,13 @@
             </intent-filter>
         </activity>
 
+
+        <activity
+            android:name=".debug.WhatsAppSuperpackInspectorActivity"
+            android:exported="false"
+            android:label="WhatsApp Native Inspector"
+            android:theme="@style/Theme.MicPlugin" />
+
         <!-- Exported only for the explicitly modified WhatsApp integration. -->
         <service
             android:name=".service.ProcessedAudioStreamService"
