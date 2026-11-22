@@ -287,7 +287,7 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
             onToggle = vm::setPitchEnabled,
         ) {
             ParamSlider("Semitones", pitchState.semitones, vm::setPitchSemitones,
-                -12f..12f, " st")
+                -6f..6f, " st")
         }
 
         // ── Plugin Chain ─────────────────────────────────────────────────────
