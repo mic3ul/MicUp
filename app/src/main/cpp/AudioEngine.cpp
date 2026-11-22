@@ -15,44 +15,6 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ── JNI monitor callback globals (file scope, outside micplugin namespace) ──
-#include <vector>
-#include <jni.h>
-
-static JavaVM*   gJvm             = nullptr;
-static jobject   gMonitorCallback = nullptr;
-static jmethodID gInvokeMethod    = nullptr;
-
-// Called from audio thread — zero-copy float pass, no conversion
-static void dispatchToKotlin(const float* buf, int32_t numFrames) {
-    if (!gJvm || !gMonitorCallback || !gInvokeMethod) return;
-    JNIEnv* env = nullptr;
-    bool attached = false;
-    jint status = gJvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-    if (status == JNI_EDETACHED) {
-        gJvm->AttachCurrentThread(&env, nullptr);
-        attached = true;
-    }
-    if (!env) return;
-
-    // Pass float[] directly — no short conversion, no quality loss, no clipping risk
-    jfloatArray arr = env->NewFloatArray(numFrames);
-    if (arr) {
-        env->SetFloatArrayRegion(arr, 0, numFrames, buf);
-        jobject jSize = env->CallStaticObjectMethod(
-            env->FindClass("java/lang/Integer"),
-            env->GetStaticMethodID(env->FindClass("java/lang/Integer"),
-                "valueOf", "(I)Ljava/lang/Integer;"),
-            (jint)numFrames
-        );
-        env->CallObjectMethod(gMonitorCallback, gInvokeMethod, arr, jSize);
-        env->DeleteLocalRef(arr);
-        if (jSize) env->DeleteLocalRef(jSize);
-    }
-    if (attached) gJvm->DetachCurrentThread();
-}
-
-
 namespace micplugin {
 
 // ─── BiquadFilter coefficient computation ────────────────────────────────────
@@ -117,6 +79,16 @@ bool AudioEngine::start() {
 void AudioEngine::stop() {
     running_.store(false, std::memory_order_release);
     closeStreams();
+}
+
+int32_t AudioEngine::readProcessedAudio(float* destination, int32_t maxFrames) {
+    if (destination == nullptr || maxFrames <= 0) return 0;
+
+    const size_t available = ring_.available_read();
+    const size_t count = std::min(available, static_cast<size_t>(maxFrames));
+    if (count == 0) return 0;
+
+    return ring_.read(destination, count) ? static_cast<int32_t>(count) : 0;
 }
 
 bool AudioEngine::openStreams() {
@@ -256,15 +228,13 @@ oboe::DataCallbackResult AudioEngine::onAudioReady(
     // Measure output level
     measureLevel(out, numFrames, params_.outputLevelDb);
 
-    // Always dispatch processed audio to Kotlin monitor (for SoftwareLoopback/metering)
-    dispatchToKotlin(out, numFrames);
+    // Publish processed samples to a bounded SPSC ring. The audio callback never
+    // enters the JVM, allocates memory, or waits for the consumer. If the consumer
+    // falls behind, this block is dropped rather than blocking the real-time thread.
+    static_cast<void>(ring_.write(out, static_cast<size_t>(numFrames)));
 
-    // The device output stream must stay silent. The audible "monitor" is produced by
-    // SoftwareLoopback's AudioTrack, which is user-toggleable and routed to the chosen
-    // output device. Leaving the processed mic in `out` here would play it to the
-    // speaker/earpiece unconditionally - i.e. you always hear yourself, even with the
-    // monitor switched off. dispatchToKotlin() already copied the buffer, so zeroing it
-    // now does not affect the virtual-mic / loopback path.
+    // The output stream is a timing driver only; playback is handled by the
+    // background PCM pump and SoftwareLoopback.
     std::fill(out, out + numFrames, 0.0f);
 
     return oboe::DataCallbackResult::Continue;
@@ -579,6 +549,24 @@ Java_com_micplugin_audio_OboeEngine_nativeGetFramesPerBurst(JNIEnv*, jobject, jl
     return reinterpret_cast<AudioEngine*>(handle)->framesPerBurst();
 }
 
+JNIEXPORT jint JNICALL
+Java_com_micplugin_audio_OboeEngine_nativeReadProcessedAudio(
+    JNIEnv* env, jobject, jlong handle, jfloatArray destination, jint maxFrames) {
+    auto* engine = reinterpret_cast<AudioEngine*>(handle);
+    if (engine == nullptr || destination == nullptr || maxFrames <= 0) return 0;
+
+    const jsize arrayLength = env->GetArrayLength(destination);
+    const jint boundedFrames = std::min({maxFrames, static_cast<jint>(arrayLength), 1024});
+    if (boundedFrames <= 0) return 0;
+
+    float samples[1024];
+    const int32_t framesRead = engine->readProcessedAudio(samples, boundedFrames);
+    if (framesRead > 0) {
+        env->SetFloatArrayRegion(destination, 0, framesRead, samples);
+    }
+    return static_cast<jint>(framesRead);
+}
+
 JNIEXPORT void JNICALL
 Java_com_micplugin_audio_OboeEngine_nativeSetInputDevice(
     JNIEnv*, jobject, jlong handle, jint deviceId) {
@@ -586,23 +574,6 @@ Java_com_micplugin_audio_OboeEngine_nativeSetInputDevice(
     if (engine) engine->setInputDeviceId(deviceId);
     LOGI("Input device set to %d", deviceId);
 }
-
-JNIEXPORT void JNICALL
-Java_com_micplugin_audio_OboeEngine_nativeSetMonitorCallback(
-    JNIEnv* env, jobject /*thiz*/, jlong /*handle*/, jobject callback) {
-
-    env->GetJavaVM(&gJvm);
-
-    if (gMonitorCallback) { env->DeleteGlobalRef(gMonitorCallback); gMonitorCallback = nullptr; }
-
-    if (callback) {
-        gMonitorCallback = env->NewGlobalRef(callback);
-        jclass cls = env->GetObjectClass(gMonitorCallback);
-        gInvokeMethod = env->GetMethodID(cls, "invoke",
-            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;");
-    }
-}
-
 
 
 JNIEXPORT jstring JNICALL

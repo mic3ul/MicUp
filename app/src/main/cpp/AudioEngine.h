@@ -163,6 +163,7 @@ public:
     int32_t sampleRate()    const { return sampleRate_; }
     int32_t getInputSessionId() const { return inputStream_ ? inputStream_->getSessionId() : -1; }
     int32_t framesPerBurst() const { return framesPerBurst_; }
+    int32_t readProcessedAudio(float* destination, int32_t maxFrames);
 
     // Preferred input device (Android AudioDeviceInfo id), oboe::kUnspecified (-1) = system default.
     // Fixes #5: previously the input stream always opened on whatever the OS considered the
@@ -216,8 +217,8 @@ private:
     int32_t sampleRate_    = 48000;
     int32_t framesPerBurst_ = 128;
 
-    // Ring buffer: ~0.5 sec @ 48kHz
-    static constexpr size_t kRingSize = 32768;
+    // Bounded hand-off queue: ~171ms at 48kHz. The consumer normally keeps it near empty.
+    static constexpr size_t kRingSize = 8192;
     SPSCRingBuffer<kRingSize> ring_;
 
     // Params (UI writes, audio thread reads)

@@ -61,11 +61,8 @@ class AudioEngine @Inject constructor(
         _levels.value = AudioLevels()
     }
 
-    fun setMonitorCallback(cb: ((FloatArray, Int) -> Unit)?) {
-        oboe.setMonitorCallback(cb)
-    }
-
     fun getInputSessionId(): Int = oboe.getInputSessionId()
+    fun readProcessedAudio(buffer: FloatArray): Int = oboe.readProcessedAudio(buffer)
     fun setMonitoring(enabled: Boolean) = oboe.setParam(98, 0, if (enabled) 1f else 0f)
     fun setMasterBypass(bypass: Boolean) = oboe.setParam(99, 0, if (bypass) 1f else 0f)
     fun setInputDevice(deviceId: Int) = oboe.setInputDevice(deviceId)

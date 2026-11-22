@@ -133,15 +133,57 @@ class AudioProcessingService : Service() {
     }
 
     private var updatesStarted = false
+    @Volatile private var audioPumpRunning = false
+    private var audioPumpThread: Thread? = null
+
+    private fun startProcessedAudioPump() {
+        if (audioPumpThread?.isAlive == true) return
+        audioPumpRunning = true
+        audioPumpThread = Thread({
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
+            } catch (e: Exception) {
+                android.util.Log.w("MicUp.Service", "Could not raise PCM pump priority: $e")
+            }
+
+            val samples = FloatArray(1024)
+            while (audioPumpRunning && !Thread.currentThread().isInterrupted) {
+                val frames = audioEngine.readProcessedAudio(samples)
+                if (frames > 0) {
+                    SoftwareLoopback.writeProcessed(samples, frames)
+                    ProcessedAudioBridge.writeProcessed(samples, frames)
+                } else {
+                    try {
+                        Thread.sleep(1)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
+            }
+        }, "MicUp-Processed-Audio-Pump").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun stopProcessedAudioPump() {
+        audioPumpRunning = false
+        val thread = audioPumpThread
+        thread?.interrupt()
+        if (thread != null && thread !== Thread.currentThread()) {
+            try {
+                thread.join(300)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        audioPumpThread = null
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopSelf()
             return START_NOT_STICKY
-        }
-        audioEngine.setMonitorCallback { buf: FloatArray, size: Int ->
-            SoftwareLoopback.writeProcessed(buf, size)
-            ProcessedAudioBridge.writeProcessed(buf, size)
         }
         val started = audioEngine.start()
         ProcessedAudioBridge.setEngineState(
@@ -151,13 +193,18 @@ class AudioProcessingService : Service() {
         if (!started) {
             android.util.Log.e("MicUp.Service", "Audio engine failed to start")
         }
-        startStatusUpdates()
+        if (!updatesStarted) {
+            startStatusUpdates()
+            updatesStarted = true
+        }
         if (!SoftwareLoopback.isRunning) SoftwareLoopback.start(this)
+        if (started) startProcessedAudioPump()
         return START_STICKY
     }
 
     override fun onDestroy() {
         updatesStarted = false
+        stopProcessedAudioPump()
         scope.cancel()
         ProcessedAudioBridge.setEngineState(active = false)
         audioEngine.stop()

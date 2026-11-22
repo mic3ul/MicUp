@@ -50,16 +50,16 @@ class OboeEngine @Inject constructor() {
 
     fun getInputSessionId(): Int = if (engineHandle != 0L) nativeGetInputSessionId(engineHandle) else -1
 
+    /** Pull processed PCM from the native SPSC queue on a non-real-time thread. */
+    fun readProcessedAudio(buffer: FloatArray): Int =
+        if (engineHandle != 0L) nativeReadProcessedAudio(engineHandle, buffer, buffer.size) else 0
+
     fun getPluginParams(pluginHandle: Long): String =
         if (engineHandle != 0L) nativeGetPluginParams(engineHandle, pluginHandle) else "[]"
 
     /** deviceId: an Android AudioDeviceInfo id, or -1 for the system default mic. */
     fun setInputDevice(deviceId: Int) {
         if (engineHandle != 0L) nativeSetInputDevice(engineHandle, deviceId)
-    }
-
-    fun setMonitorCallback(callback: ((FloatArray, Int) -> Unit)?) {
-        if (engineHandle != 0L) nativeSetMonitorCallback(engineHandle, callback)
     }
 
     fun setPluginParam(pluginHandle: Long, paramId: Int, value: Float) {
@@ -87,7 +87,7 @@ class OboeEngine @Inject constructor() {
     private external fun nativeUnloadPlugin(handle: Long, pluginHandle: Long)
     private external fun nativeSetPluginParam(handle: Long, pluginHandle: Long, paramId: Int, value: Float)
     private external fun nativeGetPluginParams(handle: Long, pluginHandle: Long): String
-    private external fun nativeSetMonitorCallback(handle: Long, callback: Any?)
+    private external fun nativeReadProcessedAudio(handle: Long, buffer: FloatArray, maxFrames: Int): Int
     private external fun nativeSetInputDevice(handle: Long, deviceId: Int)
     private external fun nativeGetSampleRate(handle: Long): Int
     private external fun nativeGetInputSessionId(handle: Long): Int
