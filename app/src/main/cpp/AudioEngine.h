@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <SoundTouch.h>
 
 namespace micplugin {
 
@@ -250,12 +251,10 @@ private:
     CombFilter   combs_[4] = {CombFilter(1116),CombFilter(1188),CombFilter(1277),CombFilter(1356)};
     AllpassFilter aps_[2]  = {AllpassFilter(556), AllpassFilter(441)};
 
-    // ─ Dual-head granular pitch shifter state ─
-    // Power-of-two sizes keep ring-buffer indexing cheap on the audio thread.
-    static constexpr int kGrainSize = 4096;
-    static constexpr int kPitchBufferSize = kGrainSize * 2;
-    float pitchIn_[kPitchBufferSize]{};
-    uint64_t pitchWritePos_ = 0;
+    // ─ SoundTouch streaming pitch processor ─
+    // Configured for speech in openStreams(); all calls stay on the audio callback.
+    soundtouch::SoundTouch pitchShifter_;
+    float pitchSemitoneCache_ = 0.0f;
 };
 
 } // namespace micplugin
