@@ -193,7 +193,6 @@ private:
     void dsp_eq(float* buf, int32_t frames);
     void dsp_compressor(float* buf, int32_t frames);
     void dsp_reverb(float* buf, int32_t frames);
-    void dsp_pitchShift(float* buf, int32_t frames);
     void measureLevel(const float* buf, int32_t frames, std::atomic<float>& out);
 
     static inline float dBToLin(float db) { return std::pow(10.0f, db * 0.05f); }
