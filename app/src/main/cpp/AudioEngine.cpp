@@ -136,6 +136,10 @@ bool AudioEngine::openStreams() {
     pitchShifter_.setSetting(SETTING_OVERLAP_MS, 8);
     pitchShifter_.setPitchSemiTones(0.0);
     pitchSemitoneCache_ = 0.0f;
+    pitchFifoHead_ = 0;
+    pitchFifoTail_ = 0;
+    pitchWasEnabled_ = false;
+    pitchConfigValid_ = true;
 
     LOGI("Input stream opened: %dHz, %d frames/burst", sampleRate_, framesPerBurst_);
 
@@ -305,25 +309,80 @@ void AudioEngine::processEffectsChain(float* buf, int32_t frames) {
     if (params_.reverbEnabled.load(std::memory_order_relaxed))
         dsp_reverb(buf, frames);
 
-    // Keep the streaming processor warm even when pitch is disabled, so enabling
-    // the effect doesn't inject a large startup gap into a live voice recording.
-    const bool pitchEnabled = params_.pitchEnabled.load(std::memory_order_relaxed);
-    const float targetSemitones = pitchEnabled
-        ? std::clamp(params_.pitchSemitones.load(std::memory_order_relaxed), -4.0f, 4.0f)
-        : 0.0f;
-    if (std::abs(targetSemitones - pitchSemitoneCache_) > 0.001f) {
+    dsp_pitchShift(buf, frames);
+}
+
+void AudioEngine::dsp_pitchShift(float* buf, int32_t frames) {
+    const bool enabled = params_.pitchEnabled.load(std::memory_order_relaxed);
+    if (!enabled) {
+        if (pitchWasEnabled_) {
+            pitchShifter_.clear();
+            pitchFifoHead_ = 0;
+            pitchFifoTail_ = 0;
+            pitchSemitoneCache_ = 0.0f;
+            pitchWasEnabled_ = false;
+        }
+        return; // Transparent pass-through while pitch shifting is disabled.
+    }
+
+    const float targetSemitones = std::clamp(
+        params_.pitchSemitones.load(std::memory_order_relaxed), -4.0f, 4.0f);
+    if (!pitchWasEnabled_) {
+        pitchShifter_.clear();
+        pitchFifoHead_ = 0;
+        pitchFifoTail_ = 0;
+        pitchWasEnabled_ = true;
+        pitchConfigValid_ = false;
+    }
+
+    if (!pitchConfigValid_ || std::abs(targetSemitones - pitchSemitoneCache_) > 0.001f) {
         pitchShifter_.setPitchSemiTones(static_cast<double>(targetSemitones));
         pitchSemitoneCache_ = targetSemitones;
+        pitchConfigValid_ = true;
     }
+
+    // SoundTouch is a buffered FIFO processor: a putSamples() call does not promise
+    // an equal number of immediately available output samples. Drain every ready
+    // sample into this fixed-capacity FIFO, then emit only complete audio blocks.
+    // This deliberately introduces the library's initial latency instead of
+    // replacing missing samples with zeros and permanently losing speech.
     pitchShifter_.putSamples(buf, static_cast<uint>(frames));
-    if (pitchEnabled) {
-        const uint received = pitchShifter_.receiveSamples(buf, static_cast<uint>(frames));
-        if (received < static_cast<uint>(frames)) {
-            std::fill(buf + received, buf + frames, 0.0f);
+
+    while (pitchShifter_.numSamples() > 0) {
+        const size_t queued = pitchFifoHead_ - pitchFifoTail_;
+        const size_t free = kPitchFifoCapacity - queued;
+        if (free == 0) break;
+
+        const size_t request = std::min({
+            free,
+            pitchScratch_.size(),
+            static_cast<size_t>(pitchShifter_.numSamples())
+        });
+        if (request == 0) break;
+
+        const uint received = pitchShifter_.receiveSamples(
+            pitchScratch_.data(), static_cast<uint>(request));
+        if (received == 0) break;
+
+        for (uint i = 0; i < received; ++i) {
+            pitchFifo_[(pitchFifoHead_ + i) & (kPitchFifoCapacity - 1)] =
+                pitchScratch_[i];
         }
-    } else {
-        pitchShifter_.receiveSamples(static_cast<uint>(frames));
+        pitchFifoHead_ += received;
     }
+
+    if (pitchFifoHead_ - pitchFifoTail_ < static_cast<size_t>(frames)) {
+        // Keep queued samples intact. Once SoundTouch has produced a full block,
+        // normal one-block-in/one-block-out streaming continues without data loss.
+        std::fill(buf, buf + frames, 0.0f);
+        return;
+    }
+
+    for (int32_t i = 0; i < frames; ++i) {
+        buf[i] = pitchFifo_[(pitchFifoTail_ + static_cast<size_t>(i)) &
+                            (kPitchFifoCapacity - 1)];
+    }
+    pitchFifoTail_ += static_cast<size_t>(frames);
 }
 
 // ─── Noise Gate ──────────────────────────────────────────────────────────────

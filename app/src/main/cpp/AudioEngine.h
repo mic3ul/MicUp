@@ -194,6 +194,7 @@ private:
     void dsp_eq(float* buf, int32_t frames);
     void dsp_compressor(float* buf, int32_t frames);
     void dsp_reverb(float* buf, int32_t frames);
+    void dsp_pitchShift(float* buf, int32_t frames);
     void measureLevel(const float* buf, int32_t frames, std::atomic<float>& out);
 
     static inline float dBToLin(float db) { return std::pow(10.0f, db * 0.05f); }
@@ -255,6 +256,15 @@ private:
     // Configured for speech in openStreams(); all calls stay on the audio callback.
     soundtouch::SoundTouch pitchShifter_;
     float pitchSemitoneCache_ = 0.0f;
+    static constexpr size_t kPitchFifoCapacity = 16384;
+    static_assert((kPitchFifoCapacity & (kPitchFifoCapacity - 1)) == 0,
+                  "Pitch FIFO capacity must be a power of two");
+    std::array<float, kPitchFifoCapacity> pitchFifo_{};
+    std::array<float, 2048> pitchScratch_{};
+    size_t pitchFifoHead_ = 0;
+    size_t pitchFifoTail_ = 0;
+    bool pitchWasEnabled_ = false;
+    bool pitchConfigValid_ = false;
 };
 
 } // namespace micplugin
