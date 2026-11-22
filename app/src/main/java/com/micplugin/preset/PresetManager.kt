@@ -79,6 +79,30 @@ class PresetManager @Inject constructor(
                 ),
             ),
             Preset(
+                name = "Warm Deep Voice",
+                isBuiltIn = true,
+                effects = EffectState(
+                    gateEnabled   = true,
+                    gateThreshold = -54f,
+                    gateAttack    = 8f,
+                    gateRelease   = 220f,
+                    eqEnabled     = true,
+                    // 31, 63, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz
+                    // Trim sub-bass and boxiness, add restrained low-mid warmth,
+                    // then soften the upper presence without losing intelligibility.
+                    eqBands = listOf(-3f, -1f, 1.8f, -1.8f, -0.5f, 0.5f, 1f, -0.8f, -1.5f, -2f),
+                    compEnabled   = true,
+                    compThreshold = -22f,
+                    compRatio     = 2.6f,
+                    compAttack    = 14f,
+                    compRelease   = 140f,
+                    compMakeup    = 1f,
+                    reverbEnabled = false,
+                    pitchEnabled  = true,
+                    pitchSemitones = -2f,
+                ),
+            ),
+            Preset(
                 name = "Deep Radio Voice",
                 isBuiltIn = true,
                 effects = EffectState(
