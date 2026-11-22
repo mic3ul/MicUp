@@ -47,6 +47,7 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
     private static final String ENTRY_DECODER = "lib/arm64-v8a/libsuperpack.so";
 
     private static volatile String loadedDecoderPath;
+    private static volatile String loadedDecoderSha256;
 
     private TextView status;
     private Button chooseButton;
@@ -169,10 +170,22 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
                         + "(e_machine must be 183).");
             }
 
-            String decoderPath = decoder.getCanonicalPath();
-            if (!decoderPath.equals(loadedDecoderPath)) {
-                System.load(decoderPath);
-                loadedDecoderPath = decoderPath;
+            String decoderHash = sha256(decoder);
+            File runtimeDir = new File(getFilesDir(), "whatsapp_native_inspector/runtime");
+            if (!runtimeDir.mkdirs() && !runtimeDir.isDirectory()) {
+                throw new IllegalStateException("Cannot create private native runtime directory.");
+            }
+            File runtimeDecoder = new File(runtimeDir, "libsuperpack.so");
+            if (loadedDecoderPath == null) {
+                copyFile(decoder, runtimeDecoder);
+                String stablePath = runtimeDecoder.getCanonicalPath();
+                System.load(stablePath);
+                loadedDecoderPath = stablePath;
+                loadedDecoderSha256 = decoderHash;
+            } else if (!decoderHash.equals(loadedDecoderSha256)) {
+                throw new IllegalStateException(
+                        "A different Superpack decoder is already loaded in this MicUp process. "
+                        + "Close and reopen MicUp before inspecting a different WhatsApp build.");
             }
 
             int nativeArchitecture = AssetDecompressor.get_architecture();
@@ -233,6 +246,16 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
             if ("arm64-v8a".equals(abi)) return true;
         }
         return false;
+    }
+
+    private void copyFile(File source, File destination) throws Exception {
+        byte[] buffer = new byte[64 * 1024];
+        try (FileInputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(destination, false)) {
+            int count;
+            while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+            out.getFD().sync();
+        }
     }
 
     private void copySplitLibraries(Uri uri, File libsArchive, File decoder) throws Exception {
