@@ -65,7 +65,7 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
         root.setBackgroundColor(0xFF101116);
 
         TextView title = new TextView(this);
-        title.setText("WhatsApp native library inspector");
+        title.setText("weirdo · WhatsApp native library inspector");
         title.setTextColor(0xFFFFFFFF);
         title.setTextSize(20f);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -75,7 +75,7 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
         TextView description = new TextView(this);
         description.setText(
                 "Select the matching split_config.arm64_v8a.apk from your own WhatsApp installation. "
-                + "MicUp will extract the paired Superpack decoder and archive into private storage. "
+                + "weirdo will extract the paired Superpack decoder and archive into private storage. "
                 + "This does not modify WhatsApp or send files anywhere.");
         description.setTextColor(0xFFB9BBC5);
         description.setTextSize(14f);
@@ -135,7 +135,7 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
         outputBundle = null;
         status.setText("Reading the selected split and checking its ARM64 libraries…");
 
-        Thread worker = new Thread(() -> runExtraction(selected), "MicUp-Superpack-Inspector");
+        Thread worker = new Thread(() -> runExtraction(selected), "weirdo-Superpack-Inspector");
         worker.setPriority(Thread.NORM_PRIORITY);
         worker.start();
     }
@@ -358,7 +358,7 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
         if (selected.isEmpty()) selected.addAll(extracted);
 
         StringBuilder manifest = new StringBuilder();
-        manifest.append("MicUp WhatsApp Superpack extraction\n");
+        manifest.append("weirdo WhatsApp Superpack extraction\n");
         manifest.append("Native architecture code: ").append(nativeArchitecture).append("\n");
         manifest.append("Returned entries: ")
                 .append(nativeResult == null ? "null" : java.util.Arrays.toString(nativeResult))
