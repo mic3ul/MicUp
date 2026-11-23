@@ -204,8 +204,8 @@ public final class WhatsAppSuperpackInspectorActivity extends Activity {
             int nativeArchitecture = AssetDecompressor.get_architecture();
             String[] nativeResult = AssetDecompressor.decompress_from_so(
                     libsArchive.getCanonicalPath(),
-                    outputDir.getCanonicalPath(),
-                    "spo");
+                    "spo",
+                    outputDir.getCanonicalPath());
 
             List<File> extracted = new ArrayList<>();
             collectSoFiles(outputDir, extracted);
