@@ -21,4 +21,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "MicPlugin"
-include(":app")
+include(":app", ":whatsapp-client")
+project(":whatsapp-client").projectDir = file("integration/whatsapp-client")
