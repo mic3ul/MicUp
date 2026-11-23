@@ -21,6 +21,6 @@ This folder contains the **consumer-side** AIDL client to be added to a modified
 1. Start weirdo's microphone foreground service while weirdo is visible.
 2. In WhatsApp's PTT recorder preparation path, bind with `ProcessedPcmClient.connect(...)`.
 3. Use the callback to feed a replacement recorder backend. Do not call `AudioRecord`, Oboe, or OpenSL ES in parallel.
-4. Close the client on pause/stop/cancel/release according to the recorder state machine.
+4. Call `setForwardingEnabled(true)` only after PTT `start()`; set it to `false` on pause and stop so preparation audio is drained but never written into the voice note. Close the client on cancel/release.
 
 The existing WhatsApp `OpusRecorder` native API has no PCM-frame input method. This client establishes the transport boundary only; it does **not** by itself modify Opus encoding or create a valid WhatsApp voice note. A replacement `OpusRecorder` backend still needs to preserve the `.opus` output, Ogg page/resume state, waveform metadata, and callbacks.
