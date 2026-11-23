@@ -43,6 +43,7 @@ public final class ProcessedPcmClient implements AutoCloseable {
     private volatile ParcelFileDescriptor readDescriptor;
     private volatile Thread readerThread;
     private volatile IProcessedAudioStream remote;
+    private volatile boolean forwardingEnabled;
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
@@ -96,6 +97,12 @@ public final class ProcessedPcmClient implements AutoCloseable {
         } catch (RuntimeException error) {
             fail(error);
         }
+    }
+
+    /** Enable only after WhatsApp calls OpusRecorder.start(); disable on pause/stop. */
+    public void setForwardingEnabled(boolean enabled) {
+        if (closed.get()) throw new IllegalStateException("client is closed");
+        forwardingEnabled = enabled;
     }
 
     private void openAndRead(IProcessedAudioStream api) {
