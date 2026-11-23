@@ -173,7 +173,7 @@ public final class ProcessedPcmClient implements AutoCloseable {
                 }
 
                 Listener target = listener;
-                if (target != null && !closed.get()) {
+                if (target != null && !closed.get() && forwardingEnabled) {
                     target.onPcm(samples, frames, sampleRate);
                 }
             }
@@ -205,6 +205,7 @@ public final class ProcessedPcmClient implements AutoCloseable {
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) return;
+        forwardingEnabled = false;
 
         ParcelFileDescriptor descriptor = readDescriptor;
         if (descriptor != null) {
