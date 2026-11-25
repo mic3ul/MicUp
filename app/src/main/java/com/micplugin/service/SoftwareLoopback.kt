@@ -206,10 +206,14 @@ object SoftwareLoopback {
                     AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
                     AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
                 )
-                preferredTypes.firstNotNullOfOrNull { type ->
-                    outputs.firstOrNull { it.type == type }
-                } ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                  ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+                var preferredDevice: AudioDeviceInfo? = null
+                for (type in preferredTypes) {
+                    preferredDevice = outputs.firstOrNull { it.type == type }
+                    if (preferredDevice != null) break
+                }
+                preferredDevice
+                    ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
             } else {
                 outputs.firstOrNull { it.id == selectedDeviceId }
                     ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
