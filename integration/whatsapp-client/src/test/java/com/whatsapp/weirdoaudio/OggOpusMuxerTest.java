@@ -40,17 +40,15 @@ public class OggOpusMuxerTest {
             muxer.finish();
 
             List<Page> pages = readPages(Files.readAllBytes(file.toPath()));
-            assertEquals(4, pages.size());
+            assertEquals(3, pages.size());
 
             assertEquals(0x02, pages.get(0).flags); // BOS
             assertEquals(0x00, pages.get(1).flags);
-            assertEquals(0x00, pages.get(2).flags);
-            assertEquals(0x04, pages.get(3).flags); // EOS on final audio page
+            assertEquals(0x04, pages.get(2).flags);
 
             assertEquals(0L, pages.get(0).granule);
             assertEquals(0L, pages.get(1).granule);
-            assertEquals(1272L, pages.get(2).granule);
-            assertEquals(2232L, pages.get(3).granule);
+            assertEquals(2232L, pages.get(2).granule);
 
             for (int i = 0; i < pages.size(); i++) {
                 assertEquals(i, pages.get(i).sequence);
@@ -93,13 +91,13 @@ public class OggOpusMuxerTest {
         assertEquals(960, OggOpusMuxer.getPacketDurationSamplesAt48k(
                 new byte[] {(byte) 0xF8, 0x00})); // CELT 20 ms
         assertEquals(5760, OggOpusMuxer.getPacketDurationSamplesAt48k(
-                new byte[] {(byte) 0xFB, 0x18})); // six 20 ms frames
+                new byte[] {(byte) 0x6B, (byte) 0x86, 0x0F})); // actual WhatsApp code-3 packet
         assertThrows(IllegalArgumentException.class,
                 () -> OggOpusMuxer.getPacketDurationSamplesAt48k(
                         new byte[] {(byte) 0xFB, 0x00})); // zero frames
         assertThrows(IllegalArgumentException.class,
                 () -> OggOpusMuxer.getPacketDurationSamplesAt48k(
-                        new byte[] {(byte) 0xFB, (byte) 0xC4})); // 49 frames
+                        new byte[] {(byte) 0xFB, 0x31})); // 49 frames
     }
 
     @Test
@@ -133,10 +131,9 @@ public class OggOpusMuxerTest {
             muxer.finish(312L + 1000L);
 
             List<Page> pages = readPages(Files.readAllBytes(file.toPath()));
-            assertEquals(4, pages.size());
-            assertEquals(1272L, pages.get(2).granule);
-            assertEquals(1312L, pages.get(3).granule);
-            assertEquals(0x04, pages.get(3).flags);
+            assertEquals(3, pages.size());
+            assertEquals(1312L, pages.get(2).granule);
+            assertEquals(0x04, pages.get(2).flags);
         } finally {
             Files.deleteIfExists(file.toPath());
         }
@@ -147,12 +144,41 @@ public class OggOpusMuxerTest {
         File file = File.createTempFile("weirdo-ogg-bad-trim-", ".opus");
         try {
             OggOpusMuxer muxer = new OggOpusMuxer(file, 48000, 1, 312, "test");
-            muxer.writePacket(new byte[] {(byte) 0xF8, 0x00}, 960);
-            muxer.writePacket(new byte[] {(byte) 0xF8, 0x00}, 960);
-            assertThrows(IllegalArgumentException.class, () -> muxer.finish(1200L));
+            byte[] largePacket = new byte[1200];
+            largePacket[0] = (byte) 0xF8;
+            for (int i = 0; i < 5; i++) muxer.writePacket(largePacket, 960);
+            assertThrows(IllegalArgumentException.class, () -> muxer.finish(4000L));
 
             muxer.finish();
-            assertEquals(0x04, readPages(Files.readAllBytes(file.toPath())).get(3).flags);
+            List<Page> pages = readPages(Files.readAllBytes(file.toPath()));
+            assertEquals(4, pages.size());
+            assertEquals(0x04, pages.get(3).flags);
+        } finally {
+            Files.deleteIfExists(file.toPath());
+        }
+    }
+
+
+    @Test
+    public void groupsPacketsIntoWhatsAppSizedOggPages() throws Exception {
+        File file = File.createTempFile("weirdo-ogg-pages-", ".opus");
+        try {
+            OggOpusMuxer muxer = new OggOpusMuxer(file, 48000, 1, 312, "WhatsApp");
+            byte[] packet = new byte[300];
+            packet[0] = (byte) 0xF8;
+            for (int i = 0; i < 16; i++) muxer.writePacket(packet, 960);
+            muxer.finish(312L + 16L * 960L, false);
+
+            List<Page> pages = readPages(Files.readAllBytes(file.toPath()));
+            assertEquals(4, pages.size());
+            assertEquals(28, pages.get(2).lacing.length);
+            assertEquals(4200, pages.get(2).body.length);
+            assertEquals(312L + 14L * 960L, pages.get(2).granule);
+            assertEquals(0, pages.get(2).flags);
+            assertEquals(4, pages.get(3).lacing.length);
+            assertEquals(600, pages.get(3).body.length);
+            assertEquals(312L + 16L * 960L, pages.get(3).granule);
+            assertEquals(0, pages.get(3).flags);
         } finally {
             Files.deleteIfExists(file.toPath());
         }
