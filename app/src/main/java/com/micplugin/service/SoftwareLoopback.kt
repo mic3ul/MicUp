@@ -47,20 +47,15 @@ object SoftwareLoopback {
         monitorTrack = buildMonitorTrack(minBuf)
         if (monitorTrack == null) { Log.e(TAG, "AudioTrack init failed"); return }
 
-        monitorTrack!!.play()
+        // Route before playback starts. In auto mode this prefers connected
+        // headphones (including classic Bluetooth A2DP), then the phone speaker.
+        applyOutputDevice()
         monitorTrack!!.setVolume(if (monitorEnabled) 1f else 0f)
-        if (android.os.Build.VERSION.SDK_INT >= 23) monitorTrack!!.preferredDevice = null
+        monitorTrack!!.play()
 
-        // Suppress physical mic playback path — processed path is the only output
-        try {
-            @Suppress("DEPRECATION")
-            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-            @Suppress("DEPRECATION")
-            audioManager?.isSpeakerphoneOn = false
-            // Mute mic playback (not recording) — stops raw voice leaking to output
-            audioManager?.isMicrophoneMute = false  // keep recording alive
-        } catch (_: Exception) {}
-
+        // This is a local sidetone monitor, not a phone-call route. Do not force
+        // MODE_IN_COMMUNICATION or speakerphone state: that can send media audio
+        // to the earpiece and make Bluetooth A2DP appear silent.
         running = true
         queue.clear()
 
@@ -84,7 +79,6 @@ object SoftwareLoopback {
         workerThread!!.priority = Thread.MAX_PRIORITY
         workerThread!!.start()
 
-        applyOutputDevice()
         requestAudioFocus()
         Log.i(TAG, "SoftwareLoopback started monitor=$monitorEnabled")
     }
@@ -99,10 +93,6 @@ object SoftwareLoopback {
         try { monitorTrack?.stop(); monitorTrack?.release() } catch (_: Exception) {}
         monitorTrack = null
         abandonAudioFocus()
-        try {
-            @Suppress("DEPRECATION") audioManager?.mode = AudioManager.MODE_NORMAL
-            @Suppress("DEPRECATION") audioManager?.isSpeakerphoneOn = false
-        } catch (_: Exception) {}
         Log.i(TAG, "SoftwareLoopback stopped")
     }
 
@@ -200,14 +190,30 @@ object SoftwareLoopback {
         try {
             val outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
             val dev = if (selectedDeviceId == -1) {
-                outputs.firstOrNull {
-                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET    ||
-                    it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET      ||
-                    it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
-                } ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
-            } else outputs.firstOrNull { it.id == selectedDeviceId }
-            dev?.let { monitorTrack?.preferredDevice = it }
+                val preferredTypes = intArrayOf(
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                    AudioDeviceInfo.TYPE_USB_HEADSET,
+                    AudioDeviceInfo.TYPE_USB_DEVICE,
+                    AudioDeviceInfo.TYPE_BLE_HEADSET,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                )
+                preferredTypes.firstNotNullOfOrNull { type ->
+                    outputs.firstOrNull { it.type == type }
+                } ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                  ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+            } else {
+                outputs.firstOrNull { it.id == selectedDeviceId }
+                    ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+            }
+            if (dev != null) {
+                val routed = monitorTrack?.setPreferredDevice(dev) ?: false
+                Log.i(TAG, "Monitor output route: ${dev.productName} type=${dev.type} selected=$routed")
+            } else {
+                monitorTrack?.preferredDevice = null
+                Log.w(TAG, "No preferred output device found; using system routing")
+            }
         } catch (e: Exception) { Log.e(TAG, "applyOutputDevice: $e") }
     }
 
@@ -224,7 +230,7 @@ object SoftwareLoopback {
         if (Build.VERSION.SDK_INT >= 26) {
             focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 .setOnAudioFocusChangeListener(listener)
                 .setWillPauseWhenDucked(false).build()
@@ -248,7 +254,7 @@ object SoftwareLoopback {
         if (Build.VERSION.SDK_INT >= 26) {
             AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 .setAudioFormat(AudioFormat.Builder()
                     .setSampleRate(SAMPLE_RATE)
@@ -258,7 +264,7 @@ object SoftwareLoopback {
                 .setTransferMode(AudioTrack.MODE_STREAM).build()
         } else {
             @Suppress("DEPRECATION")
-            AudioTrack(AudioManager.STREAM_VOICE_CALL, SAMPLE_RATE,
+            AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,   // pre-API26 fallback
                 bufSize * 2, AudioTrack.MODE_STREAM)
