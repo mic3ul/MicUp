@@ -196,36 +196,53 @@ object SoftwareLoopback {
         val am = audioManager ?: return
         try {
             val outputs = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-            val dev = if (selectedDeviceId == -1) {
+            var dev: AudioDeviceInfo? = null
+            var alreadySelected = false
+
+            if (selectedDeviceId != -1) {
+                dev = outputs.firstOrNull { it.id == selectedDeviceId }
+            } else {
+                // Try each compatible sink until AudioTrack accepts the preferred route.
+                // A2DP is preferred over SCO for a media/sidetone monitor.
                 val preferredTypes = intArrayOf(
                     AudioDeviceInfo.TYPE_WIRED_HEADSET,
                     AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
                     AudioDeviceInfo.TYPE_USB_HEADSET,
                     AudioDeviceInfo.TYPE_USB_DEVICE,
                     AudioDeviceInfo.TYPE_BLE_HEADSET,
-                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
                     AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
                 )
-                var preferredDevice: AudioDeviceInfo? = null
                 for (type in preferredTypes) {
-                    preferredDevice = outputs.firstOrNull { it.type == type }
-                    if (preferredDevice != null) break
+                    val candidate = outputs.firstOrNull { it.type == type } ?: continue
+                    if (monitorTrack?.setPreferredDevice(candidate) == true) {
+                        dev = candidate
+                        alreadySelected = true
+                        break
+                    }
                 }
-                preferredDevice
-                    ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-                    ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
-            } else {
-                outputs.firstOrNull { it.id == selectedDeviceId }
-                    ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
             }
+
+            // Prefer the loudspeaker for local testing when no headset route is usable.
+            if (dev == null) {
+                dev = outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+                    ?: outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
+            }
+
             if (dev != null) {
-                val routed = monitorTrack?.setPreferredDevice(dev) ?: false
+                val routed = alreadySelected || (monitorTrack?.setPreferredDevice(dev) ?: false)
                 Log.i(TAG, "Monitor output route: ${dev.productName} type=${dev.type} selected=$routed")
+                if (!routed) {
+                    monitorTrack?.preferredDevice = null
+                    Log.w(TAG, "Preferred route rejected; restored system audio routing")
+                }
             } else {
                 monitorTrack?.preferredDevice = null
                 Log.w(TAG, "No preferred output device found; using system routing")
             }
-        } catch (e: Exception) { Log.e(TAG, "applyOutputDevice: $e") }
+        } catch (e: Exception) {
+            Log.e(TAG, "applyOutputDevice: $e")
+        }
     }
 
     private fun requestAudioFocus() {
