@@ -7,35 +7,29 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.List;
 
-/**
- * Minimal Ogg Opus muxer. It accepts already encoded Opus packets; it does not
- * capture audio or encode PCM. Each Opus packet is written on its own Ogg page.
- */
+/** Ogg Opus muxer using the 4 KiB page batching observed in WhatsApp PTT files. */
 public final class OggOpusMuxer implements Closeable {
     private static final int MAX_SEGMENTS = 255;
     private static final int MAX_PACKET_BYTES = 65024;
+    private static final int TARGET_PAGE_BODY_BYTES = 4096;
     private static final int CRC_POLY = 0x04C11DB7;
     private static final int[] CRC_TABLE = buildCrcTable();
-
-    private static final class Pending {
-        final byte[] packet;
-        final long granule;
-
-        Pending(byte[] packet, long granule) {
-            this.packet = packet;
-            this.granule = granule;
-        }
-    }
 
     private final FileOutputStream output;
     private final int preSkip;
     private final int serial;
+    private final List<Integer> audioLacing = new ArrayList<>();
+    private final ByteArrayOutputStream audioBody =
+            new ByteArrayOutputStream(TARGET_PAGE_BODY_BYTES + 2048);
+
     private int sequence;
     private long totalSamples;
+    private long audioPageGranule;
     private long lastWrittenGranule;
     private long pages;
-    private Pending pending;
     private boolean finished;
 
     public OggOpusMuxer(File file, int inputSampleRate, int channels,
@@ -48,18 +42,16 @@ public final class OggOpusMuxer implements Closeable {
         if (preSkipAt48k < 0 || preSkipAt48k > 65535) {
             throw new IllegalArgumentException("Invalid pre-skip");
         }
-
         this.preSkip = preSkipAt48k;
         this.serial = new SecureRandom().nextInt();
+        this.audioPageGranule = preSkipAt48k;
+        this.lastWrittenGranule = preSkipAt48k;
         this.output = new FileOutputStream(file, false);
-        writePage(0x02, 0L, makeOpusHead(inputSampleRate, channels, preSkipAt48k));
-        writePage(0x00, 0L, makeOpusTags(vendor == null ? "weirdo" : vendor));
+
+        writeSinglePacketPage(0x02, 0L, makeOpusHead(inputSampleRate, channels, preSkipAt48k));
+        writeSinglePacketPage(0x00, 0L, makeOpusTags(vendor == null ? "weirdo" : vendor));
     }
 
-    /**
-     * Writes an encoded Opus packet. The duration argument is expressed on
-     * Ogg's 48 kHz granule clock and must agree with the packet TOC.
-     */
     public synchronized void writePacket(byte[] packet, int durationSamplesAt48k)
             throws IOException {
         ensureOpen();
@@ -69,27 +61,46 @@ public final class OggOpusMuxer implements Closeable {
         if (packet.length > MAX_PACKET_BYTES) {
             throw new IllegalArgumentException("Packet too large for one Ogg page");
         }
+        if (durationSamplesAt48k <= 0) {
+            throw new IllegalArgumentException("Opus packet duration must be positive");
+        }
 
-        int packetDuration = getPacketDurationSamplesAt48k(packet);
-        if (durationSamplesAt48k != packetDuration) {
+        int parsedDuration = getPacketDurationSamplesAt48k(packet);
+        if (durationSamplesAt48k != parsedDuration) {
             throw new IllegalArgumentException(
-                    "Duration does not match Opus TOC: expected " + packetDuration
+                    "Duration does not match Opus TOC: expected " + parsedDuration
                             + " samples at 48 kHz, received " + durationSamplesAt48k);
         }
 
-        if (pending != null) {
-            writePage(0x00, pending.granule, pending.packet);
-            lastWrittenGranule = pending.granule;
+        int requiredSegments = packet.length / 255 + 1;
+        if (requiredSegments > MAX_SEGMENTS) {
+            throw new IllegalArgumentException("Packet requires too many Ogg lacing segments");
         }
 
-        totalSamples += packetDuration;
-        pending = new Pending(packet.clone(), preSkip + totalSamples);
+        // A page that has reached 4 KiB is flushed only when the next packet
+        // arrives, leaving the last page available for exact granule trimming.
+        if (!audioLacing.isEmpty() &&
+                (audioBody.size() >= TARGET_PAGE_BODY_BYTES ||
+                        audioLacing.size() + requiredSegments > MAX_SEGMENTS)) {
+            flushAudioPage(0x00, audioPageGranule);
+        }
+
+        int remaining = packet.length;
+        for (int i = 0; i < requiredSegments; i++) {
+            int lace = Math.min(255, remaining);
+            audioLacing.add(lace);
+            remaining -= lace;
+        }
+        audioBody.write(packet, 0, packet.length);
+
+        if (Long.MAX_VALUE - totalSamples < parsedDuration) {
+            throw new IllegalStateException("Ogg granule sample counter overflow");
+        }
+        totalSamples += parsedDuration;
+        audioPageGranule = preSkip + totalSamples;
     }
 
-    /**
-     * Derives packet duration from the Opus TOC. This prevents incorrect
-     * granule positions caused by passing an arbitrary duration to writePacket.
-     */
+    /** Derive Opus packet duration from its TOC on the 48 kHz granule clock. */
     public static int getPacketDurationSamplesAt48k(byte[] packet) {
         if (packet == null || packet.length == 0) {
             throw new IllegalArgumentException("Empty Opus packet");
@@ -104,7 +115,7 @@ public final class OggOpusMuxer implements Closeable {
             int[] silkDurations = {480, 960, 1920, 2880};
             samplesPerFrame = silkDurations[config & 0x03];
         } else if (config < 16) {
-            samplesPerFrame = (config & 0x02) == 0 ? 480 : 960;
+            samplesPerFrame = (config & 0x01) == 0 ? 480 : 960;
         } else {
             int[] celtDurations = {120, 240, 480, 960};
             samplesPerFrame = celtDurations[config & 0x03];
@@ -119,8 +130,9 @@ public final class OggOpusMuxer implements Closeable {
             if (packet.length < 2) {
                 throw new IllegalArgumentException("Opus code-3 packet has no frame-count byte");
             }
-            // RFC 6716: M occupies bits 2..7; the low bits are VBR/padding flags.
-            frameCount = (packet[1] >>> 2) & 0x3f;
+            // In the TOC byte's network bit numbering, v/p occupy the two
+            // leading bits; the M frame count is the low six numeric bits.
+            frameCount = packet[1] & 0x3f;
             if (frameCount < 1 || frameCount > 48) {
                 throw new IllegalArgumentException("Invalid Opus frame count: " + frameCount);
             }
@@ -133,43 +145,45 @@ public final class OggOpusMuxer implements Closeable {
         return duration;
     }
 
-    public synchronized long getWrittenPageCount() {
-        return pages;
-    }
+    public synchronized long getWrittenPageCount() { return pages; }
 
     public synchronized long getGranulePosition() {
         return preSkip + totalSamples;
     }
 
     public synchronized void finish() throws IOException {
-        finish(preSkip + totalSamples);
+        finish(preSkip + totalSamples, true);
+    }
+
+    public synchronized void finish(long finalGranulePosition) throws IOException {
+        finish(finalGranulePosition, true);
     }
 
     /**
-     * Finalizes the stream at the exact valid sample position on the 48 kHz
-     * granule clock. Pass a lower value than getGranulePosition() when the
-     * final encoded packet was padded to a complete frame.
+     * markEos=false matches the final-page flag observed in the supplied
+     * WhatsApp PTT sample. The default overload remains standards-oriented.
      */
-    public synchronized void finish(long finalGranulePosition) throws IOException {
+    public synchronized void finish(long finalGranulePosition, boolean markEos)
+            throws IOException {
         if (finished) return;
 
-        if (pending != null) {
+        if (!audioLacing.isEmpty()) {
             long minimum = Math.max(lastWrittenGranule, preSkip);
-            if (finalGranulePosition < minimum || finalGranulePosition > pending.granule) {
+            if (finalGranulePosition < minimum ||
+                    finalGranulePosition > audioPageGranule) {
                 throw new IllegalArgumentException(
                         "Final granule position must be between " + minimum
-                                + " and " + pending.granule + ", received "
+                                + " and " + audioPageGranule + ", received "
                                 + finalGranulePosition);
             }
-            writePage(0x04, finalGranulePosition, pending.packet);
-            pending = null;
+            flushAudioPage(markEos ? 0x04 : 0x00, finalGranulePosition);
         } else {
             long expected = preSkip + totalSamples;
             if (finalGranulePosition != expected) {
                 throw new IllegalArgumentException(
-                        "Cannot trim a stream without a pending final packet");
+                        "Cannot trim a stream without a pending final audio page");
             }
-            writeEmptyEosPage(expected);
+            if (markEos) writeEmptyEosPage(expected);
         }
 
         output.flush();
@@ -178,21 +192,70 @@ public final class OggOpusMuxer implements Closeable {
         output.close();
     }
 
-    /** Closes an incomplete stream without writing an EOS page. */
     public synchronized void abort() throws IOException {
         if (finished) return;
-        pending = null;
+        audioLacing.clear();
+        audioBody.reset();
         finished = true;
         output.close();
     }
 
     @Override
-    public synchronized void close() throws IOException {
-        finish();
-    }
+    public synchronized void close() throws IOException { finish(); }
 
     private void ensureOpen() throws IOException {
         if (finished) throw new IOException("Ogg Opus stream already finished");
+    }
+
+    private void flushAudioPage(int flags, long granule) throws IOException {
+        int[] lacing = new int[audioLacing.size()];
+        for (int i = 0; i < audioLacing.size(); i++) lacing[i] = audioLacing.get(i);
+        writePage(flags, granule, lacing, audioBody.toByteArray());
+        lastWrittenGranule = granule;
+        audioLacing.clear();
+        audioBody.reset();
+    }
+
+    private void writeSinglePacketPage(int flags, long granule, byte[] packet)
+            throws IOException {
+        int segments = packet.length / 255 + 1;
+        if (segments > MAX_SEGMENTS) throw new IOException("Too many Ogg lacing segments");
+        int[] lacing = new int[segments];
+        int remaining = packet.length;
+        for (int i = 0; i < segments; i++) {
+            lacing[i] = Math.min(255, remaining);
+            remaining -= lacing[i];
+        }
+        writePage(flags, granule, lacing, packet);
+    }
+
+    private void writePage(int flags, long granule, int[] lacing, byte[] body)
+            throws IOException {
+        if (lacing.length > MAX_SEGMENTS) throw new IOException("Too many Ogg lacing segments");
+        int bodyLength = 0;
+        for (int lace : lacing) bodyLength += lace;
+        if (bodyLength != body.length) throw new IOException("Ogg lacing/body size mismatch");
+
+        ByteArrayOutputStream b = new ByteArrayOutputStream(27 + lacing.length + body.length);
+        putAscii(b, "OggS");
+        b.write(0);
+        b.write(flags);
+        u64(b, granule);
+        u32(b, serial);
+        u32(b, sequence++);
+        u32(b, 0);
+        b.write(lacing.length);
+        for (int lace : lacing) b.write(lace);
+        b.write(body, 0, body.length);
+
+        byte[] page = b.toByteArray();
+        putU32(page, 22, crc(page));
+        output.write(page);
+        pages++;
+    }
+
+    private void writeEmptyEosPage(long granule) throws IOException {
+        writePage(0x04, granule, new int[0], new byte[0]);
     }
 
     private static byte[] makeOpusHead(int rate, int channels, int preSkip) {
@@ -215,51 +278,6 @@ public final class OggOpusMuxer implements Closeable {
         b.write(v, 0, v.length);
         u32(b, 0);
         return b.toByteArray();
-    }
-
-    private void writePage(int type, long granule, byte[] packet) throws IOException {
-        int segments = packet.length / 255 + 1;
-        if (segments > MAX_SEGMENTS) throw new IOException("Too many Ogg lacing segments");
-
-        ByteArrayOutputStream b = new ByteArrayOutputStream(27 + segments + packet.length);
-        putAscii(b, "OggS");
-        b.write(0);
-        b.write(type);
-        u64(b, granule);
-        u32(b, serial);
-        u32(b, sequence++);
-        u32(b, 0);
-        b.write(segments);
-
-        int remaining = packet.length;
-        for (int i = 0; i < segments; i++) {
-            int lace = Math.min(255, remaining);
-            b.write(lace);
-            remaining -= lace;
-        }
-        b.write(packet, 0, packet.length);
-
-        byte[] page = b.toByteArray();
-        putU32(page, 22, crc(page));
-        output.write(page);
-        pages++;
-    }
-
-    private void writeEmptyEosPage(long granule) throws IOException {
-        ByteArrayOutputStream b = new ByteArrayOutputStream(27);
-        putAscii(b, "OggS");
-        b.write(0);
-        b.write(0x04);
-        u64(b, granule);
-        u32(b, serial);
-        u32(b, sequence++);
-        u32(b, 0);
-        b.write(0);
-
-        byte[] page = b.toByteArray();
-        putU32(page, 22, crc(page));
-        output.write(page);
-        pages++;
     }
 
     private static void putAscii(ByteArrayOutputStream out, String text) {
