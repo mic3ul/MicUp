@@ -104,7 +104,7 @@ class AudioProcessingService : Service() {
     private fun acquireWakeLock() {
         val pm = getSystemService(PowerManager::class.java)
         wakeLock = pm.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK, "MicPlugin::AudioWakeLock"
+            PowerManager.PARTIAL_WAKE_LOCK, "weirdo::AudioWakeLock"
         ).apply { acquire() } // No timeout — released explicitly in onDestroy
     }
 
@@ -125,7 +125,7 @@ class AudioProcessingService : Service() {
             // when a microphone foreground service is started while the app is not in an
             // eligible (foreground) state. Fail gracefully instead of crashing the whole app;
             // MainActivity will (re)start the service from onResume() while in the foreground.
-            android.util.Log.e("MicUp.Service", "startForeground(microphone) not allowed: $e")
+            android.util.Log.e("weirdo.Service", "startForeground(microphone) not allowed: $e")
             stopSelf()
             return
         }
@@ -143,7 +143,7 @@ class AudioProcessingService : Service() {
             try {
                 android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
             } catch (e: Exception) {
-                android.util.Log.w("MicUp.Service", "Could not raise PCM pump priority: $e")
+                android.util.Log.w("weirdo.Service", "Could not raise PCM pump priority: $e")
             }
 
             val samples = FloatArray(1024)
@@ -160,7 +160,7 @@ class AudioProcessingService : Service() {
                     }
                 }
             }
-        }, "MicUp-Processed-Audio-Pump").apply {
+        }, "weirdo-Processed-Audio-Pump").apply {
             isDaemon = true
             start()
         }
@@ -191,7 +191,7 @@ class AudioProcessingService : Service() {
             sampleRate = audioEngine.status.value.sampleRate,
         )
         if (!started) {
-            android.util.Log.e("MicUp.Service", "Audio engine failed to start")
+            android.util.Log.e("weirdo.Service", "Audio engine failed to start")
         }
         if (!updatesStarted) {
             startStatusUpdates()
