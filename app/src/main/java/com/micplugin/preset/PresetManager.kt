@@ -38,6 +38,7 @@ data class EffectState(
 
     val pitchEnabled:  Boolean = false,
     val pitchSemitones: Float  = 0f,
+    val vocalShine: Float = 0f,
 )
 
 @Serializable
@@ -99,8 +100,35 @@ class PresetManager @Inject constructor(
                     compRelease   = 170f,
                     compMakeup    = 1.5f,
                     reverbEnabled = false,
-                    pitchEnabled  = true,
-                    pitchSemitones = -1f,
+                    // Keep the natural pitch: SoundTouch shifting can smear transient consonants.
+                    pitchEnabled  = false,
+                    pitchSemitones = 0f,
+                ),
+            ),
+            Preset(
+                name = "Singer Resonance",
+                isBuiltIn = true,
+                effects = EffectState(
+                    gateEnabled = true,
+                    gateThreshold = -58f,
+                    gateAttack = 4f,
+                    gateRelease = 300f,
+                    eqEnabled = true,
+                    // Controlled chest warmth, clear vowel body and a restrained presence lift.
+                    eqBands = listOf(-4f, -1.5f, 1.4f, -1.2f, -0.5f, 0.6f, 1.5f, 2.0f, 1.0f, -1.0f),
+                    compEnabled = true,
+                    compThreshold = -22f,
+                    compRatio = 2.2f,
+                    compAttack = 20f,
+                    compRelease = 150f,
+                    compMakeup = 1.5f,
+                    reverbEnabled = true,
+                    reverbMix = 0.055f,
+                    reverbRoom = 0.24f,
+                    reverbDamp = 0.68f,
+                    pitchEnabled = false,
+                    pitchSemitones = 0f,
+                    vocalShine = 0.38f,
                 ),
             ),
             Preset(
@@ -137,8 +165,9 @@ class PresetManager @Inject constructor(
                     compRatio     = 3f,
                     compMakeup    = 2f,
                     reverbEnabled = true,
-                    reverbMix     = 0.12f,
-                    reverbRoom    = 0.3f,
+                    reverbMix     = 0.08f,
+                    reverbRoom    = 0.28f,
+                    vocalShine    = 0.18f,
                 ),
             ),
         )
