@@ -110,6 +110,9 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
         }
 
         try {
+            if (accumulator.getCapturedSamples() == 0L) {
+                throw new IllegalStateException("Cannot finalize an empty voice note");
+            }
             accumulator.flushPadded(this::encodeFrame);
             long finalGranule = encoder.getLookaheadSamples()
                     + accumulator.getCapturedSamples();
