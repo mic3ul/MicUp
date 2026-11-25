@@ -17,7 +17,7 @@ import javax.inject.Inject
 class AudioProcessingService : Service() {
 
     companion object {
-        const val CHANNEL_ID   = "micplugin_audio"
+        const val CHANNEL_ID   = "weirdo_audio"
         const val NOTIF_ID     = 1001
         const val ACTION_STOP  = "com.micplugin.STOP"
 
@@ -50,7 +50,7 @@ class AudioProcessingService : Service() {
                     failCount = 0
                 } catch (e: Exception) {
                     failCount++
-                    android.util.Log.e("MicUp.Service", "Status update failed #$failCount: $e")
+                    android.util.Log.e("weirdo.Service", "Status update failed #$failCount: $e")
                     // Re-pin notification so OEM can't kill it
                     try {
                         startForeground(NOTIF_ID, buildNotification("Active", 0, 0f))
@@ -76,7 +76,7 @@ class AudioProcessingService : Service() {
 
         val latencyStr = if (latencyMs > 0f) " · ${latencyMs.toInt()}ms" else ""
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("MicUp Active")
+            .setContentTitle("weirdo Active")
             .setContentText("$text$latencyStr")
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
             .setContentIntent(mainIntent)
@@ -92,7 +92,7 @@ class AudioProcessingService : Service() {
 
     private fun createNotificationChannel() {
         val ch = NotificationChannel(
-            CHANNEL_ID, "MicUp Audio",
+            CHANNEL_ID, "weirdo Audio",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "Real-time audio processing service"
