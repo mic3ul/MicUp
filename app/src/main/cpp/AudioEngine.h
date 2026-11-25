@@ -82,6 +82,10 @@ struct EffectParams {
     std::atomic<float> pitchSemitones{0.0f};
     std::atomic<bool>  pitchEnabled{false};
 
+    // Vocal shine: subtle harmonic coloration plus adaptive sibilance control.
+    // 0 = bypass; 1 = strongest recommended intensity.
+    std::atomic<float> vocalShineAmount{0.0f};
+
     // Metering (audio thread → UI)
     std::atomic<float> inputLevelDb{-100.0f};
     std::atomic<float> outputLevelDb{-100.0f};
@@ -185,6 +189,7 @@ private:
     // DSP (all called from audio thread, no allocations)
     void processEffectsChain(float* buf, int32_t frames);
     void dsp_inputCleanup(float* buf, int32_t frames);
+    void dsp_vocalShine(float* buf, int32_t frames);
     void dsp_noiseGate(float* buf, int32_t frames);
     void dsp_eq(float* buf, int32_t frames);
     void dsp_compressor(float* buf, int32_t frames);
@@ -234,6 +239,11 @@ private:
     float highpassPrevInput_ = 0.0f;
     float highpassPrevOutput_ = 0.0f;
     float highpassAlpha_ = 0.991f;
+
+    // Vocal-shine detector/filter state; all accessed only on audio callback.
+    float vocalUpperLowpass_ = 0.0f;
+    float vocalAirLowpass_ = 0.0f;
+    float vocalSibilanceEnvelope_ = 0.0f;
 
     // ─ EQ state ─
     static constexpr int kEqBands = 10;
