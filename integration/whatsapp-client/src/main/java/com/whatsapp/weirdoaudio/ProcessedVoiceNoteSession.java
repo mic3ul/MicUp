@@ -26,6 +26,10 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
     private final ProcessedOpusRecorder recorder;
     private final Listener listener;
     private volatile State state = State.PREPARED;
+    // PTT can transition to RECORDING before Android delivers onServiceConnected.
+    // Queue that transition instead of throwing while the AIDL pipe is binding.
+    private boolean startRequested;
+    private boolean pauseRequested;
 
     public ProcessedVoiceNoteSession(Context context, File outputFile, Listener listener)
             throws IOException {
@@ -72,9 +76,21 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
         }
     }
 
-    /** Called by the WhatsApp PTT controller after its record/start transition. */
+    /**
+     * Called by the WhatsApp PTT controller after its record/start transition.
+     * If binding is still in progress, the start is queued and applied as soon
+     * as the PCM format has been validated on the binder callback thread.
+     */
     public synchronized void start() {
+        if (state == State.CONNECTING) {
+            startRequested = true;
+            return;
+        }
         requireState(State.READY);
+        beginRecording();
+    }
+
+    private void beginRecording() {
         recorder.start();
         state = State.RECORDING;
         pcmClient.setForwardingEnabled(true);
@@ -82,6 +98,10 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
 
     /** Stops forwarding PCM without flushing or resetting the Opus encoder. */
     public synchronized void pause() {
+        if (state == State.CONNECTING && startRequested) {
+            pauseRequested = true;
+            return;
+        }
         requireState(State.RECORDING);
         pcmClient.setForwardingEnabled(false);
         recorder.pause();
@@ -151,6 +171,16 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
                     return;
                 }
                 state = State.READY;
+                if (startRequested) {
+                    beginRecording();
+                    startRequested = false;
+                    if (pauseRequested) {
+                        pcmClient.setForwardingEnabled(false);
+                        recorder.pause();
+                        state = State.PAUSED;
+                        pauseRequested = false;
+                    }
+                }
             }
 
             if (listener != null) listener.onReady(this);
