@@ -297,24 +297,56 @@ object SoftwareLoopback {
         } catch (_: Exception) {}
     }
 
-    private fun buildMonitorTrack(bufSize: Int): AudioTrack? = try {
-        if (Build.VERSION.SDK_INT >= 26) {
-            AudioTrack.Builder()
-                .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                .setAudioFormat(AudioFormat.Builder()
-                    .setSampleRate(SAMPLE_RATE)
-                    .setEncoding(FORMAT)   // PCM_FLOAT — no conversion ever
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                .setBufferSizeInBytes(bufSize * 4)   // float = 4 bytes per sample
-                .setTransferMode(AudioTrack.MODE_STREAM).build()
-        } else {
-            @Suppress("DEPRECATION")
-            AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,   // pre-API26 fallback
-                bufSize * 2, AudioTrack.MODE_STREAM)
+    /**
+     * Prefer float playback, then fall back to PCM16 if the device rejects it.
+     * AudioTrack.getMinBufferSize() already returns bytes.
+     */
+    private fun buildMonitorTrack(): AudioTrack? {
+        val candidates = if (Build.VERSION.SDK_INT >= 26) {
+            intArrayOf(FORMAT_FLOAT, FORMAT_PCM16)
+        } else intArrayOf(FORMAT_PCM16)
+
+        for (encoding in candidates) {
+            val minBytes = AudioTrack.getMinBufferSize(
+                SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, encoding
+            )
+            if (minBytes <= 0) {
+                Log.w(TAG, "Monitor encoding=$encoding unsupported (buffer=$minBytes)")
+                continue
+            }
+
+            val track = try {
+                if (Build.VERSION.SDK_INT >= 26) {
+                    AudioTrack.Builder()
+                        .setAudioAttributes(AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                        .setAudioFormat(AudioFormat.Builder()
+                            .setSampleRate(SAMPLE_RATE)
+                            .setEncoding(encoding)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                        .setBufferSizeInBytes(minBytes.coerceAtLeast(4096))
+                        .setTransferMode(AudioTrack.MODE_STREAM)
+                        .build()
+                } else {
+                    @Suppress("DEPRECATION")
+                    AudioTrack(AudioManager.STREAM_MUSIC, SAMPLE_RATE,
+                        AudioFormat.CHANNEL_OUT_MONO, FORMAT_PCM16,
+                        minBytes.coerceAtLeast(4096), AudioTrack.MODE_STREAM)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "AudioTrack construction failed encoding=$encoding: $e")
+                null
+            }
+
+            if (track != null && track.state == AudioTrack.STATE_INITIALIZED) {
+                monitorEncoding = if (Build.VERSION.SDK_INT < 26) FORMAT_PCM16 else encoding
+                Log.i(TAG, "Monitor track initialized encoding=$monitorEncoding bytes=$minBytes")
+                return track
+            }
+            try { track?.release() } catch (_: Exception) {}
+            Log.w(TAG, "AudioTrack did not initialize for encoding=$encoding; trying fallback")
         }
-    } catch (e: Exception) { Log.e(TAG, "buildMonitorTrack: $e"); null }
+        return null
+    }
 }
