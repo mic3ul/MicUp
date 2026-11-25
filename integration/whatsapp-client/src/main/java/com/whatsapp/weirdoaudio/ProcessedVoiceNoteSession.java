@@ -14,7 +14,7 @@ import java.io.IOException;
  * PTT callbacks in the target WhatsApp build.
  */
 public final class ProcessedVoiceNoteSession implements AutoCloseable {
-    public enum State { PREPARED, CONNECTING, RECORDING, PAUSED, FINISHED, CANCELLED, FAILED }
+    public enum State { PREPARED, CONNECTING, READY, RECORDING, PAUSED, FINISHED, CANCELLED, FAILED }
 
     public interface Listener {
         void onReady(ProcessedVoiceNoteSession session);
@@ -74,9 +74,10 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
 
     /** Called by the WhatsApp PTT controller after its record/start transition. */
     public synchronized void start() {
-        requireState(State.RECORDING);
-        // Recording is already enabled once onReady has completed. This
-        // method intentionally acts as a lifecycle assertion for the PTT hook.
+        requireState(State.READY);
+        recorder.start();
+        state = State.RECORDING;
+        pcmClient.setForwardingEnabled(true);
     }
 
     /** Stops forwarding PCM without flushing or resetting the Opus encoder. */
@@ -122,7 +123,7 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
 
         if (listener != null) {
             try {
-                listener.onFinished(new File(getOutputPath()), samples, packets);
+                listener.onFinished(recorder.getOutputFile(), samples, packets);
             } catch (RuntimeException ignored) {
                 // Listener/UI errors must not invalidate an already finalized file.
             }
@@ -137,12 +138,6 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
         recorder.cancel();
     }
 
-    private String outputPath;
-
-    private synchronized String getOutputPath() {
-        return outputPath == null ? "" : outputPath;
-    }
-
     private void handleReady(int sampleRate, int channels, int encoding) {
         try {
             if (sampleRate != OpusPcmEncoder.SAMPLE_RATE || channels != 1 ||
@@ -155,10 +150,7 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
                     pcmClient.close();
                     return;
                 }
-                recorder.start();
-                state = State.RECORDING;
-                pcmClient.setForwardingEnabled(true);
-                outputPath = getRecorderOutputPath();
+                state = State.READY;
             }
 
             if (listener != null) listener.onReady(this);
@@ -199,14 +191,8 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
         }
     }
 
-    private String getRecorderOutputPath() {
-        // Keep file ownership with the caller; the listener receives the
-        // original File instance through getOutputFile().
-        return "";
-    }
-
     public File getOutputFile() {
-        return new File(getOutputPath());
+        return recorder.getOutputFile();
     }
 
     private void requireState(State expected) {
