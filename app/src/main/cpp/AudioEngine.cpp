@@ -167,6 +167,9 @@ bool AudioEngine::openStreams() {
     cleanupPrevSample_ = 0.0f;
     highpassPrevInput_ = 0.0f;
     highpassPrevOutput_ = 0.0f;
+    vocalUpperLowpass_ = 0.0f;
+    vocalAirLowpass_ = 0.0f;
+    vocalSibilanceEnvelope_ = 0.0f;
     pitchShifter_.clear();
     pitchShifter_.setSampleRate(static_cast<uint>(sampleRate_));
     pitchShifter_.setChannels(1);
@@ -465,7 +468,12 @@ void AudioEngine::dsp_vocalShine(float* buf, int32_t frames) {
 
     const float amount = std::clamp(
         params_.vocalShineAmount.load(std::memory_order_relaxed), 0.0f, 1.0f);
-    if (amount <= 0.001f) return;
+    if (amount <= 0.001f) {
+        vocalUpperLowpass_ = 0.0f;
+        vocalAirLowpass_ = 0.0f;
+        vocalSibilanceEnvelope_ = 0.0f;
+        return;
+    }
 
     // Separate the upper vocal band so the exciter does not distort the bass/fundamental.
     const float upperAlpha = std::exp(
