@@ -12,7 +12,7 @@ object SoftwareLoopback {
 
     private const val TAG         = "MicPlugin.Loopback"
     private const val SAMPLE_RATE = 48000
-    private const val FORMAT      = AudioFormat.ENCODING_PCM_FLOAT
+    private const val FORMAT      = AudioFormat.ENCODING_PCM_FLOAT // preferred output format
     private const val QUEUE_CAP   = 16  // max buffered frames before dropping
 
     private var monitorTrack:  AudioTrack?   = null
