@@ -59,7 +59,7 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                "MIC PLUGIN",
+                "WEIRDO",
                 style = MaterialTheme.typography.titleLarge,
                 color = StudioColors.TextPrimary,
                 fontWeight = FontWeight.Black,
