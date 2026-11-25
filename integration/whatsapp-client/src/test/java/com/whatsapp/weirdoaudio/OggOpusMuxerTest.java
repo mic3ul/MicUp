@@ -36,7 +36,7 @@ public class OggOpusMuxerTest {
             OggOpusMuxer muxer = new OggOpusMuxer(file, 48000, 1, 312, "weirdo-test");
             muxer.writePacket(new byte[] {(byte) 0xF8, 0x00}, 960);
             muxer.writePacket(new byte[] {(byte) 0xF8, 0x01}, 960);
-            assertEquals(1272L, muxer.getGranulePosition());
+            assertEquals(2232L, muxer.getGranulePosition());
             muxer.finish();
 
             List<Page> pages = readPages(Files.readAllBytes(file.toPath()));
@@ -185,7 +185,7 @@ public class OggOpusMuxerTest {
             assertTrue("incomplete Ogg page body", data.length - offset >= pageLength);
             byte[] pageBytes = new byte[pageLength];
             System.arraycopy(data, offset, pageBytes, 0, pageLength);
-            assertEquals(readU32(data, offset + 22), oggCrc(pageBytes));
+            assertEquals(readU32(data, offset + 22), oggCrc(pageBytes) & 0xffffffffL);
 
             byte[] body = new byte[bodyLength];
             System.arraycopy(data, offset + headerLength, body, 0, bodyLength);
