@@ -43,6 +43,10 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
         this.muxer = createdMuxer;
     }
 
+    public File getOutputFile() {
+        return outputFile;
+    }
+
     public synchronized State getState() {
         return state;
     }
