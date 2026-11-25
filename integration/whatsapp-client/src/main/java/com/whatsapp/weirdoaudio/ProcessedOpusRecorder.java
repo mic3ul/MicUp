@@ -100,6 +100,7 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
             state = State.FAILED;
             abortQuietly();
             encoder.close();
+            packetAggregator.close();
             throw failure;
         }
     }
@@ -131,6 +132,7 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
             throw failure;
         } finally {
             encoder.close();
+            packetAggregator.close();
         }
     }
 
@@ -178,6 +180,8 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
         try {
             muxer.abort();
         } catch (IOException ignored) {
+        } finally {
+            packetAggregator.close();
         }
     }
 
