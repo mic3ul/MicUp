@@ -3,6 +3,7 @@ package com.micplugin.service
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.media.audiofx.NoiseSuppressor
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
@@ -33,6 +34,7 @@ class AudioProcessingService : Service() {
     @Inject lateinit var audioEngine: AudioEngine
 
     private var wakeLock: PowerManager.WakeLock? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
     private fun startStatusUpdates() {
@@ -110,6 +112,45 @@ class AudioProcessingService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Use the device's own supported voice denoiser when available.
+     * This is optional platform DSP, not an assumed neural model.
+     */
+    private fun attachPlatformNoiseSuppressor() {
+        try {
+            noiseSuppressor?.release()
+            noiseSuppressor = null
+
+            if (!NoiseSuppressor.isAvailable()) {
+                android.util.Log.i("weirdo.Audio", "Platform NoiseSuppressor is not available")
+                return
+            }
+
+            val sessionId = audioEngine.getInputSessionId()
+            if (sessionId <= 0) {
+                android.util.Log.w("weirdo.Audio", "No allocated input session for NoiseSuppressor")
+                return
+            }
+
+            val effect = NoiseSuppressor.create(sessionId)
+            if (effect == null) {
+                android.util.Log.w("weirdo.Audio", "Platform NoiseSuppressor could not be created")
+                return
+            }
+
+            val result = effect.setEnabled(true)
+            noiseSuppressor = effect
+            android.util.Log.i(
+                "weirdo.Audio",
+                "Platform NoiseSuppressor enabled result=$result hasControl=${effect.hasControl()}"
+            )
+        } catch (e: Exception) {
+            android.util.Log.w("weirdo.Audio", "Platform NoiseSuppressor setup failed: $e")
+            try { noiseSuppressor?.release() } catch (_: Exception) {}
+            noiseSuppressor = null
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -186,6 +227,11 @@ class AudioProcessingService : Service() {
             return START_NOT_STICKY
         }
         val started = audioEngine.start()
+        if (started) attachPlatformNoiseSuppressor()
+        else {
+            try { noiseSuppressor?.release() } catch (_: Exception) {}
+            noiseSuppressor = null
+        }
         ProcessedAudioBridge.setEngineState(
             active = started,
             sampleRate = audioEngine.status.value.sampleRate,
@@ -207,6 +253,10 @@ class AudioProcessingService : Service() {
         stopProcessedAudioPump()
         scope.cancel()
         ProcessedAudioBridge.setEngineState(active = false)
+        try { noiseSuppressor?.release() } catch (e: Exception) {
+            android.util.Log.w("weirdo.Audio", "NoiseSuppressor release failed: $e")
+        }
+        noiseSuppressor = null
         audioEngine.stop()
         SoftwareLoopback.stop()
         wakeLock?.release()
