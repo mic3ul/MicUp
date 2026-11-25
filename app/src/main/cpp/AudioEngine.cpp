@@ -318,6 +318,9 @@ void AudioEngine::processEffectsChain(float* buf, int32_t frames) {
     if (params_.eqEnabled.load(std::memory_order_relaxed))
         dsp_eq(buf, frames);
 
+    if (params_.vocalShineAmount.load(std::memory_order_relaxed) > 0.001f)
+        dsp_vocalShine(buf, frames);
+
     if (params_.compEnabled.load(std::memory_order_relaxed))
         dsp_compressor(buf, frames);
 
@@ -451,6 +454,59 @@ void AudioEngine::dsp_noiseGate(float* buf, int32_t frames) {
         float coef   = (target > gateEnv_) ? attackCoef : releaseCoef;
         gateEnv_    += coef * (target - gateEnv_);
         buf[i]      *= gateEnv_;
+    }
+}
+
+// ─── Vocal shine: restrained upper-harmonic warmth + adaptive de-essing ───────
+// This is a light timbral enhancer, not pitch correction or AI voice conversion.
+// It leaves the fundamental and lower vocal body untouched.
+void AudioEngine::dsp_vocalShine(float* buf, int32_t frames) {
+    if (frames <= 0) return;
+
+    const float amount = std::clamp(
+        params_.vocalShineAmount.load(std::memory_order_relaxed), 0.0f, 1.0f);
+    if (amount <= 0.001f) return;
+
+    // Separate the upper vocal band so the exciter does not distort the bass/fundamental.
+    const float upperAlpha = std::exp(
+        -2.0f * static_cast<float>(M_PI) * 650.0f / static_cast<float>(sampleRate_));
+    // Detect only the sharp sibilant region; preserve normal vowel brightness.
+    const float airAlpha = std::exp(
+        -2.0f * static_cast<float>(M_PI) * 5200.0f / static_cast<float>(sampleRate_));
+    const float attack = 1.0f - std::exp(-1.0f / (0.002f * sampleRate_));
+    const float release = 1.0f - std::exp(-1.0f / (0.055f * sampleRate_));
+
+    constexpr float kDrive = 1.65f;
+    const float normalization = std::tanh(kDrive);
+    const float harmonicBlend = 0.14f * amount;
+    constexpr float kSibilanceThreshold = 0.045f;
+
+    for (int i = 0; i < frames; ++i) {
+        const float input = buf[i];
+
+        vocalUpperLowpass_ =
+            upperAlpha * vocalUpperLowpass_ + (1.0f - upperAlpha) * input;
+        const float upperBand = input - vocalUpperLowpass_;
+
+        const float saturated = std::tanh(kDrive * upperBand) / normalization;
+        float output = input + (saturated - upperBand) * harmonicBlend;
+
+        vocalAirLowpass_ =
+            airAlpha * vocalAirLowpass_ + (1.0f - airAlpha) * output;
+        const float sibilantBand = output - vocalAirLowpass_;
+        const float sibilantLevel = std::fabs(sibilantBand);
+        const float detectorCoef =
+            (sibilantLevel > vocalSibilanceEnvelope_) ? attack : release;
+        vocalSibilanceEnvelope_ +=
+            detectorCoef * (sibilantLevel - vocalSibilanceEnvelope_);
+
+        const float excess = std::max(
+            0.0f, vocalSibilanceEnvelope_ - kSibilanceThreshold);
+        const float reduction = std::clamp(excess * 4.0f, 0.0f, 0.45f) * amount;
+        output -= sibilantBand * reduction;
+
+        // Headroom guard; the following compressor remains responsible for level control.
+        buf[i] = std::clamp(output, -0.985f, 0.985f);
     }
 }
 
@@ -602,6 +658,11 @@ Java_com_micplugin_audio_OboeEngine_nativeSetParam(
         case 4: // Pitch
             if (paramId==0) p.pitchSemitones.store(value, std::memory_order_relaxed);
             else if (paramId==1) p.pitchEnabled.store(value > 0.5f, std::memory_order_relaxed);
+            break;
+        case 5: // Vocal Shine intensity [0, 1]
+            if (paramId == 0)
+                p.vocalShineAmount.store(std::clamp(value, 0.0f, 1.0f),
+                                         std::memory_order_relaxed);
             break;
         case 99: // Master bypass
             p.masterBypass.store(value > 0.5f, std::memory_order_relaxed);
