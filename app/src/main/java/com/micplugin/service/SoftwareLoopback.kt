@@ -12,10 +12,12 @@ object SoftwareLoopback {
 
     private const val TAG         = "MicPlugin.Loopback"
     private const val SAMPLE_RATE = 48000
-    private const val FORMAT      = AudioFormat.ENCODING_PCM_FLOAT // preferred output format
+    private const val FORMAT_FLOAT = AudioFormat.ENCODING_PCM_FLOAT
+    private const val FORMAT_PCM16 = AudioFormat.ENCODING_PCM_16BIT
     private const val QUEUE_CAP   = 16  // max buffered frames before dropping
 
     private var monitorTrack:  AudioTrack?   = null
+    private var monitorEncoding: Int = FORMAT_FLOAT
     private var workerThread:  Thread?       = null
     private var audioManager:  AudioManager? = null
     private var selectedDeviceId: Int        = -1
@@ -43,17 +45,27 @@ object SoftwareLoopback {
         monitorEnabled = context.getSharedPreferences("micup_prefs", Context.MODE_PRIVATE)
             .getBoolean("monitor_enabled", true)
 
-        val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE,
-            AudioFormat.CHANNEL_OUT_MONO, FORMAT).coerceAtLeast(4096)
-
-        monitorTrack = buildMonitorTrack(minBuf)
-        if (monitorTrack == null) { Log.e(TAG, "AudioTrack init failed"); return }
+        monitorTrack = buildMonitorTrack()
+        if (monitorTrack == null) {
+            Log.e(TAG, "AudioTrack init failed for PCM_FLOAT and PCM_16BIT")
+            return
+        }
 
         // Route before playback starts. In auto mode this prefers connected
         // headphones (including classic Bluetooth A2DP), then the phone speaker.
         applyOutputDevice()
-        monitorTrack!!.setVolume(if (monitorEnabled) 1f else 0f)
-        monitorTrack!!.play()
+        try {
+            monitorTrack!!.setVolume(if (monitorEnabled) 1f else 0f)
+            monitorTrack!!.play()
+            if (monitorTrack!!.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                throw IllegalStateException("AudioTrack did not enter PLAYING state")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "AudioTrack playback start failed: $e")
+            try { monitorTrack?.release() } catch (_: Exception) {}
+            monitorTrack = null
+            return
+        }
 
         // This is a local sidetone monitor, not a phone-call route. Do not force
         // MODE_IN_COMMUNICATION or speakerphone state: that can send media audio
@@ -63,26 +75,33 @@ object SoftwareLoopback {
 
         // Worker thread drains queue → writes to AudioTrack (blocking OK here)
         workerThread = Thread({
-            Log.i(TAG, "Worker thread started")
+            Log.i(TAG, "Worker thread started encoding=$monitorEncoding")
+            val pcm16 = ShortArray(1024)
             while (running) {
                 try {
                     val block = queue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
                         ?: continue
                     try {
                         if (monitorEnabled) {
-                            monitorTrack?.write(
-                                block.samples, 0, block.sampleCount, AudioTrack.WRITE_BLOCKING
-                            )
+                            val track = monitorTrack ?: continue
+                            val written = if (monitorEncoding == FORMAT_FLOAT) {
+                                track.write(block.samples, 0, block.sampleCount, AudioTrack.WRITE_BLOCKING)
+                            } else {
+                                for (i in 0 until block.sampleCount) {
+                                    pcm16[i] = (block.samples[i].coerceIn(-1f, 1f) * 32767f).toInt().toShort()
+                                }
+                                track.write(pcm16, 0, block.sampleCount, AudioTrack.WRITE_BLOCKING)
+                            }
+                            if (written < 0) Log.e(TAG, "AudioTrack write failed code=$written")
                         }
                     } finally {
-                        // Recycle the storage buffer even if the output device rejects a write.
                         pool.offer(block.samples)
                     }
                 } catch (_: InterruptedException) { break }
                   catch (e: Exception) { Log.e(TAG, "Worker write error: $e") }
             }
             Log.i(TAG, "Worker thread stopped")
-        }, "MicUp-Monitor-Worker")
+        }, "weirdo-Monitor-Worker")
         workerThread!!.priority = Thread.MAX_PRIORITY
         workerThread!!.start()
 
