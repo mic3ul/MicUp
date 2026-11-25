@@ -33,6 +33,7 @@ public final class OggOpusMuxer implements Closeable {
     private final int serial;
     private int sequence;
     private long totalSamples;
+    private long lastWrittenGranule;
     private long pages;
     private Pending pending;
     private boolean finished;
@@ -76,7 +77,10 @@ public final class OggOpusMuxer implements Closeable {
                             + " samples at 48 kHz, received " + durationSamplesAt48k);
         }
 
-        if (pending != null) writePage(0x00, pending.granule, pending.packet);
+        if (pending != null) {
+            writePage(0x00, pending.granule, pending.packet);
+            lastWrittenGranule = pending.granule;
+        }
 
         totalSamples += packetDuration;
         pending = new Pending(packet.clone(), preSkip + totalSamples);
@@ -115,6 +119,7 @@ public final class OggOpusMuxer implements Closeable {
             if (packet.length < 2) {
                 throw new IllegalArgumentException("Opus code-3 packet has no frame-count byte");
             }
+            // RFC 6716: M occupies bits 2..7; the low bits are VBR/padding flags.
             frameCount = (packet[1] >>> 2) & 0x3f;
             if (frameCount < 1 || frameCount > 48) {
                 throw new IllegalArgumentException("Invalid Opus frame count: " + frameCount);
@@ -137,13 +142,34 @@ public final class OggOpusMuxer implements Closeable {
     }
 
     public synchronized void finish() throws IOException {
+        finish(preSkip + totalSamples);
+    }
+
+    /**
+     * Finalizes the stream at the exact valid sample position on the 48 kHz
+     * granule clock. Pass a lower value than getGranulePosition() when the
+     * final encoded packet was padded to a complete frame.
+     */
+    public synchronized void finish(long finalGranulePosition) throws IOException {
         if (finished) return;
 
         if (pending != null) {
-            writePage(0x04, pending.granule, pending.packet);
+            long minimum = Math.max(lastWrittenGranule, preSkip);
+            if (finalGranulePosition < minimum || finalGranulePosition > pending.granule) {
+                throw new IllegalArgumentException(
+                        "Final granule position must be between " + minimum
+                                + " and " + pending.granule + ", received "
+                                + finalGranulePosition);
+            }
+            writePage(0x04, finalGranulePosition, pending.packet);
             pending = null;
         } else {
-            writeEmptyEosPage(preSkip + totalSamples);
+            long expected = preSkip + totalSamples;
+            if (finalGranulePosition != expected) {
+                throw new IllegalArgumentException(
+                        "Cannot trim a stream without a pending final packet");
+            }
+            writeEmptyEosPage(expected);
         }
 
         output.flush();
