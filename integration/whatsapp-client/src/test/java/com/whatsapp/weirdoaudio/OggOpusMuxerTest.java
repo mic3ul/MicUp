@@ -120,6 +120,44 @@ public class OggOpusMuxerTest {
         }
     }
 
+    @Test
+    public void trimsPaddedSamplesOnFinalEosPage() throws Exception {
+        File file = File.createTempFile("weirdo-ogg-trim-", ".opus");
+        try {
+            OggOpusMuxer muxer = new OggOpusMuxer(file, 48000, 1, 312, "test");
+            muxer.writePacket(new byte[] {(byte) 0xF8, 0x00}, 960);
+            muxer.writePacket(new byte[] {(byte) 0xF8, 0x00}, 960);
+
+            // 1000 real samples were captured; the second 960-sample packet
+            // therefore contains 920 samples of encoder padding.
+            muxer.finish(312L + 1000L);
+
+            List<Page> pages = readPages(Files.readAllBytes(file.toPath()));
+            assertEquals(4, pages.size());
+            assertEquals(1272L, pages.get(2).granule);
+            assertEquals(1312L, pages.get(3).granule);
+            assertEquals(0x04, pages.get(3).flags);
+        } finally {
+            Files.deleteIfExists(file.toPath());
+        }
+    }
+
+    @Test
+    public void refusesFinalGranuleBeforePreviousCompletedPage() throws Exception {
+        File file = File.createTempFile("weirdo-ogg-bad-trim-", ".opus");
+        try {
+            OggOpusMuxer muxer = new OggOpusMuxer(file, 48000, 1, 312, "test");
+            muxer.writePacket(new byte[] {(byte) 0xF8, 0x00}, 960);
+            muxer.writePacket(new byte[] {(byte) 0xF8, 0x00}, 960);
+            assertThrows(IllegalArgumentException.class, () -> muxer.finish(1200L));
+
+            muxer.finish();
+            assertEquals(0x04, readPages(Files.readAllBytes(file.toPath())).get(3).flags);
+        } finally {
+            Files.deleteIfExists(file.toPath());
+        }
+    }
+
     private static List<Page> readPages(byte[] data) {
         List<Page> pages = new ArrayList<>();
         int offset = 0;
