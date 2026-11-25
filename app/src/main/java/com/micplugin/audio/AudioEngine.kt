@@ -90,6 +90,7 @@ class AudioEngine @Inject constructor(
 
     fun setPitchSemitones(st: Float)  = oboe.setParam(4, 0, st)
     fun setPitchEnabled(on: Boolean)  = oboe.setParam(4, 1, if (on) 1f else 0f)
+    fun setVocalShine(amount: Float) = oboe.setParam(5, 0, amount.coerceIn(0f, 1f))
 
     // ── Plugin loading ────────────────────────────────────────────────────────
     fun getPluginParamsJson(handle: Long): String = oboe.getPluginParams(handle)
