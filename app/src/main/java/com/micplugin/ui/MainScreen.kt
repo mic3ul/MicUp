@@ -168,30 +168,45 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
         }
 
 
-        // Monitor output toggle (hear yourself)
-        if (status.isRunning) {
+        // Live monitor: keep this visible while stopped so the test path is discoverable.
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(7.dp),
+            color = StudioColors.Card,
+            border = BorderStroke(1.dp, StudioColors.Border),
+        ) {
             Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text(
-                        "Monitor Output",
+                        "LIVE AUDIO MONITOR",
                         style = MaterialTheme.typography.labelSmall,
                         color = StudioColors.TextPrimary,
                         letterSpacing = 1.sp,
                     )
                     Text(
-                        if (monitoring) "Hearing yourself" else "Silent to you — still routed",
+                        when {
+                            !status.isRunning -> "Engine is off — tap the power icon above"
+                            monitoring -> "Processed microphone audio is playing"
+                            else -> "Monitor muted — processing can continue"
+                        },
                         fontSize = 10.sp,
                         color = StudioColors.TextMuted,
                     )
+                    if (!status.isRunning) {
+                        Text(
+                            "Connect headphones before starting to avoid acoustic feedback",
+                            fontSize = 9.sp,
+                            color = StudioColors.Accent,
+                        )
+                    }
                 }
                 Switch(
                     checked = monitoring,
+                    enabled = status.isRunning,
                     onCheckedChange = { vm.setMonitoring(context, it) },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor   = Color.White,
