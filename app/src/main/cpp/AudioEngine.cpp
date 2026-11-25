@@ -153,7 +153,20 @@ bool AudioEngine::openStreams() {
     }
 
     if (result != oboe::Result::OK) {
-        LOGE("Failed to open input stream: %s", oboe::convertToText(result));
+        // Some audio HALs do not support an allocated input session in exclusive
+        // VoiceCommunication mode. Keep the engine usable with a shared generic
+        // capture stream; platform NoiseSuppressor will simply remain unavailable.
+        LOGE("Input stream with allocated session failed: %s; retrying shared generic capture",
+             oboe::convertToText(result));
+        builder.setSessionId(oboe::SessionId::None)
+               ->setSharingMode(oboe::SharingMode::Shared)
+               ->setInputPreset(oboe::InputPreset::Generic);
+        result = builder.openStream(inputStream_);
+    }
+
+    if (result != oboe::Result::OK) {
+        LOGE("Failed to open input stream after compatibility fallback: %s",
+             oboe::convertToText(result));
         return false;
     }
 
