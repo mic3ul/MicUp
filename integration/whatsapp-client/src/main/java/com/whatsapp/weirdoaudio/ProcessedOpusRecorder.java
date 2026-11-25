@@ -15,6 +15,7 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
 
     private final File outputFile;
     private final OpusPcmEncoder encoder;
+    private final OpusPacketAggregator packetAggregator;
     private final OggOpusMuxer muxer;
     private final PcmFrameAccumulator accumulator = new PcmFrameAccumulator();
     private State state = State.PREPARED;
@@ -29,17 +30,21 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
         this.outputFile = outputFile;
 
         OpusPcmEncoder createdEncoder = new OpusPcmEncoder(bitrate);
+        OpusPacketAggregator createdAggregator = null;
         OggOpusMuxer createdMuxer;
         try {
+            createdAggregator = new OpusPacketAggregator();
             int preSkip = createdEncoder.getLookaheadSamples();
             createdMuxer = new OggOpusMuxer(
                     outputFile, OpusPcmEncoder.SAMPLE_RATE,
-                    OpusPcmEncoder.CHANNELS, preSkip, "weirdo");
+                    OpusPcmEncoder.CHANNELS, preSkip, "WhatsApp");
         } catch (IOException | RuntimeException failure) {
+            if (createdAggregator != null) createdAggregator.close();
             createdEncoder.close();
             throw failure;
         }
         this.encoder = createdEncoder;
+        this.packetAggregator = createdAggregator;
         this.muxer = createdMuxer;
     }
 
@@ -114,9 +119,11 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
                 throw new IllegalStateException("Cannot finalize an empty voice note");
             }
             accumulator.flushPadded(this::encodeFrame);
+            byte[] finalPacket = packetAggregator.flush();
+            if (finalPacket != null) writeEncodedPacket(finalPacket);
             long finalGranule = encoder.getLookaheadSamples()
                     + accumulator.getCapturedSamples();
-            muxer.finish(finalGranule);
+            muxer.finish(finalGranule, false);
             state = State.FINISHED;
         } catch (IOException | RuntimeException failure) {
             state = State.FAILED;
@@ -139,6 +146,7 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
             closeFailure = failure;
         } finally {
             encoder.close();
+            packetAggregator.close();
         }
 
         if (outputFile.exists() && !outputFile.delete() && closeFailure == null) {
@@ -148,7 +156,12 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
     }
 
     private void encodeFrame(short[] pcmFrame) throws IOException {
-        byte[] packet = encoder.encodeFrame(pcmFrame, 0);
+        byte[] framePacket = encoder.encodeFrame(pcmFrame, 0);
+        byte[] combined = packetAggregator.add(framePacket);
+        if (combined != null) writeEncodedPacket(combined);
+    }
+
+    private void writeEncodedPacket(byte[] packet) throws IOException {
         int duration = OggOpusMuxer.getPacketDurationSamplesAt48k(packet);
         muxer.writePacket(packet, duration);
         encodedPackets++;
@@ -174,6 +187,7 @@ public final class ProcessedOpusRecorder implements AutoCloseable {
             cancel();
         } else {
             encoder.close();
+            packetAggregator.close();
         }
     }
 }
