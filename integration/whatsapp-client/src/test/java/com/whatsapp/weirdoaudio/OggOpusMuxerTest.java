@@ -93,13 +93,13 @@ public class OggOpusMuxerTest {
         assertEquals(960, OggOpusMuxer.getPacketDurationSamplesAt48k(
                 new byte[] {(byte) 0xF8, 0x00})); // CELT 20 ms
         assertEquals(5760, OggOpusMuxer.getPacketDurationSamplesAt48k(
-                new byte[] {(byte) 0xFB, 0x06})); // six 20 ms frames
+                new byte[] {(byte) 0xFB, 0x18})); // six 20 ms frames
         assertThrows(IllegalArgumentException.class,
                 () -> OggOpusMuxer.getPacketDurationSamplesAt48k(
                         new byte[] {(byte) 0xFB, 0x00})); // zero frames
         assertThrows(IllegalArgumentException.class,
                 () -> OggOpusMuxer.getPacketDurationSamplesAt48k(
-                        new byte[] {(byte) 0xFB, 0x31})); // 49 frames
+                        new byte[] {(byte) 0xFB, (byte) 0xC4})); // 49 frames
     }
 
     @Test
