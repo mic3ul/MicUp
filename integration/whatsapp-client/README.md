@@ -28,7 +28,7 @@ The existing WhatsApp `OpusRecorder` native API has no PCM-frame input method. `
 
 ## Ogg Opus muxer
 
-`OggOpusMuxer.java` writes an Ogg Opus stream from **already encoded Opus packets**. It emits `OpusHead` and `OpusTags`, page sequence numbers, granule positions, lacing values, and Ogg CRC checksums. It derives packet duration from the Opus TOC and rejects caller-supplied durations that disagree. Its finalization API can trim padded samples from the final encoded packet by setting the EOS granule position to the exact number of captured samples. It holds the final packet until `finish()` so the EOS flag is applied to the final audio page.
+`OggOpusMuxer.java` writes an Ogg Opus stream from **already encoded Opus packets**. It emits `OpusHead` and `OpusTags`, page sequence numbers, granule positions, lacing values, and Ogg CRC checksums. It derives packet duration from the Opus TOC and rejects caller-supplied durations that disagree. It batches packets into approximately 4 KiB Ogg audio pages, and can set the final granule position to the exact number of captured samples. Its `finish(granule, false)` mode reproduces the no-EOS final page observed in the supplied WhatsApp PTT sample; ordinary `finish()` uses the normal EOS flag. It holds the final packet until `finish()` so the EOS flag is applied to the final audio page.
 
 The writer was validated on the development host with actual Opus packets: `ffprobe` identified the output as mono 48 kHz Opus in Ogg, and `ffmpeg` decoded the complete file successfully. The source is Java 8 language/API compatible.
 
@@ -40,12 +40,13 @@ The writer was validated on the development host with actual Opus packets: `ffpr
 The client AAR now builds a separate JNI Opus encoder from the official Xiph Opus 1.6.1 source archive. The download is pinned with the published SHA-256 value so a future upstream branch change cannot silently alter the codec source.
 
 - `OpusPcmEncoder` encodes signed PCM16 mono at 48 kHz in 20 ms (960-sample) frames. It uses the Opus voice application mode, 20 kb/s default target bitrate, complexity 5, and queries the encoder's actual lookahead for the Ogg pre-skip.
+- `OpusPacketAggregator` combines six compatible 20 ms frames into one 120 ms Opus packet; if the Opus encoder changes mode/bandwidth, it flushes the current shorter group and starts a new one.
 - `PcmFrameAccumulator` joins variable-sized AIDL chunks, retains incomplete frames across pauses, and pads only the last partial frame.
 - `ProcessedOpusRecorder` encodes the frames, writes Ogg Opus packets, and sets the EOS granule to the real captured sample count so final-frame padding is not played.
 - `ProcessedVoiceNoteSession` coordinates the AIDL client and recorder lifecycle. It waits in READY until the PTT hook calls `start()`; pause/resume toggle forwarding without resetting the Opus encoder; `finish()` finalizes the file; `cancel()` deletes an unfinished file.
 
 The encoder API requires complete supported Opus frames; at 48 kHz, 960 samples is a 20 ms frame. The implementation keeps encoding off the real-time audio callback and processes PCM on the dedicated pipe reader thread. See the [Opus encoder API](https://opus-codec.org/docs/html_api/group__opusencoder.html).
 
-**Integration boundary:** these classes form a compiled PCM-to-Opus/Ogg pipeline, but they are not yet injected into the WhatsApp PTT controller or substituted for WhatsApp's `OpusRecorder`. The target-version PTT class must call `ProcessedVoiceNoteSession` at prepare/start/pause/resume/stop/cancel and must preserve WhatsApp's waveform/page callbacks and file metadata. No end-to-end WhatsApp send test has been claimed.
+**Integration boundary:** these classes form a compiled PCM-to-Opus/Ogg pipeline and the DEX seam has now been identified precisely, but they are not yet injected into the WhatsApp PTT controller or substituted for WhatsApp's native `OpusRecorder`. The target-version PTT class must call `ProcessedVoiceNoteSession` at prepare/start/pause/resume/stop/cancel and must preserve WhatsApp's waveform/page callbacks and file metadata. No end-to-end WhatsApp send test has been claimed.
 
 The muxer unit tests check page boundaries, sequence numbers, granule positions, BOS/EOS flags, the exact-255-byte lacing edge case, TOC duration parsing, and CRCs. CI runs `:whatsapp-client:testDebugUnitTest` alongside the Android builds.
