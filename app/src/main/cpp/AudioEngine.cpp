@@ -68,10 +68,20 @@ AudioEngine::~AudioEngine() {
 }
 
 bool AudioEngine::start() {
-    if (running_.load()) return true;
+    if (running_.load(std::memory_order_acquire)) return true;
     ring_.reset();
     if (!openStreams()) return false;
+
+    // Start the input callback only after the state and DSP are fully initialized.
     running_.store(true, std::memory_order_release);
+    const oboe::Result startResult = inputStream_->requestStart();
+    if (startResult != oboe::Result::OK) {
+        LOGE("Failed to start input stream: %s", oboe::convertToText(startResult));
+        running_.store(false, std::memory_order_release);
+        closeStreams();
+        return false;
+    }
+
     LOGI("AudioEngine started: %dHz, %d frames/burst", sampleRate_, framesPerBurst_);
     return true;
 }
@@ -79,6 +89,27 @@ bool AudioEngine::start() {
 void AudioEngine::stop() {
     running_.store(false, std::memory_order_release);
     closeStreams();
+}
+
+void AudioEngine::setInputDeviceId(int32_t deviceId) {
+    const bool wasRunning = running_.exchange(false, std::memory_order_acq_rel);
+    inputDeviceId_.store(deviceId, std::memory_order_relaxed);
+    if (!wasRunning) return;
+
+    closeStreams();
+    if (!openStreams()) {
+        LOGE("Could not reopen input stream for device %d", deviceId);
+        return;
+    }
+
+    running_.store(true, std::memory_order_release);
+    const oboe::Result result = inputStream_->requestStart();
+    if (result != oboe::Result::OK) {
+        LOGE("Could not restart input stream for device %d: %s",
+             deviceId, oboe::convertToText(result));
+        running_.store(false, std::memory_order_release);
+        closeStreams();
+    }
 }
 
 int32_t AudioEngine::readProcessedAudio(float* destination, int32_t maxFrames) {
@@ -102,11 +133,14 @@ bool AudioEngine::openStreams() {
         .setDirection(oboe::Direction::Input)
         ->setDeviceId(preferredInputId)
         ->setInputPreset(oboe::InputPreset::VoiceCommunication)
+        ->setSessionId(oboe::SessionId::Allocate)
         ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
         ->setSharingMode(oboe::SharingMode::Exclusive)
         ->setFormat(oboe::AudioFormat::Float)
         ->setChannelCount(1)
         ->setSampleRate(48000)
+        ->setDataCallback(this)
+        ->setErrorCallback(this)
         ->openStream(inputStream_);
 
     if (result != oboe::Result::OK && preferredInputId != oboe::kUnspecified) {
@@ -128,6 +162,11 @@ bool AudioEngine::openStreams() {
 
     // Speech-tuned time-domain stretching parameters: short sequences and
     // overlap keep consonants clear while changing pitch without slowing speech.
+    highpassAlpha_ = std::exp(-2.0f * static_cast<float>(M_PI) * 72.0f /
+                              static_cast<float>(sampleRate_));
+    cleanupPrevSample_ = 0.0f;
+    highpassPrevInput_ = 0.0f;
+    highpassPrevOutput_ = 0.0f;
     pitchShifter_.clear();
     pitchShifter_.setSampleRate(static_cast<uint>(sampleRate_));
     pitchShifter_.setChannels(1);
@@ -143,32 +182,10 @@ bool AudioEngine::openStreams() {
 
     LOGI("Input stream opened: %dHz, %d frames/burst", sampleRate_, framesPerBurst_);
 
-    // ─ Output stream (playback → VOICE_COMMUNICATION) ────────────────────────
-    builder.setDirection(oboe::Direction::Output)
-           ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-           ->setSharingMode(oboe::SharingMode::Exclusive)
-           ->setFormat(oboe::AudioFormat::Float)
-           ->setChannelCount(1)
-           ->setSampleRate(sampleRate_)
-           ->setFramesPerDataCallback(framesPerBurst_)
-           ->setDataCallback(this)
-           ->setErrorCallback(this)
-           ->setUsage(oboe::Usage::VoiceCommunication)
-           ->setContentType(oboe::ContentType::Speech);
-
-    result = builder.openStream(outputStream_);
-    if (result != oboe::Result::OK) {
-        LOGE("Failed to open output stream: %s", oboe::convertToText(result));
-        inputStream_->close();
-        return false;
-    }
-
-    // Boost audio thread priority (SCHED_FIFO P96 via Oboe)
-    outputStream_->setBufferSizeInFrames(framesPerBurst_ * 2);
-
-    // Start both streams
-    inputStream_->requestStart();
-    outputStream_->requestStart();
+    // The input stream itself drives the audio callback. Avoid polling an input
+    // stream with a zero-timeout read from a separate output callback: that races
+    // capture timing and can replace valid speech blocks with silence.
+    inputStream_->setBufferSizeInFrames(framesPerBurst_ * 2);
 
     eqDirty_ = true;
     rebuildEQ();
@@ -176,8 +193,11 @@ bool AudioEngine::openStreams() {
 }
 
 void AudioEngine::closeStreams() {
-    if (outputStream_) { outputStream_->requestStop(); outputStream_->close(); outputStream_.reset(); }
-    if (inputStream_)  { inputStream_->requestStop();  inputStream_->close();  inputStream_.reset();  }
+    if (inputStream_) {
+        inputStream_->requestStop();
+        inputStream_->close();
+        inputStream_.reset();
+    }
 }
 
 void AudioEngine::rebuildEQ() {
@@ -194,52 +214,35 @@ void AudioEngine::rebuildEQ() {
     eqDirty_ = false;
 }
 
-// ─── Audio callback (output stream drives everything) ────────────────────────
+// ─── Audio callback (microphone input drives processing) ─────────────────────
 oboe::DataCallbackResult AudioEngine::onAudioReady(
     oboe::AudioStream* stream, void* audioData, int32_t numFrames) {
 
-    auto* out = static_cast<float*>(audioData);
-
+    auto* samples = static_cast<float*>(audioData);
+    if (samples == nullptr || numFrames <= 0) {
+        return oboe::DataCallbackResult::Continue;
+    }
     if (!running_.load(std::memory_order_acquire)) {
-        std::fill(out, out + numFrames, 0.0f);
         return oboe::DataCallbackResult::Continue;
     }
 
-    // Read from input stream (non-blocking, 0ns timeout)
-    oboe::ResultWithValue<int32_t> readResult =
-        inputStream_->read(out, numFrames, 0);
+    // Oboe supplies the captured samples directly. No cross-stream polling,
+    // no zero-timeout read, and no synthetic silence on a late input block.
+    measureLevel(samples, numFrames, params_.inputLevelDb);
 
-    int32_t framesRead = (readResult) ? readResult.value() : 0;
-
-    if (framesRead < numFrames) {
-        // Zero-fill remaining frames to avoid glitches
-        std::fill(out + framesRead, out + numFrames, 0.0f);
-    }
-
-    // Measure input level (no log, no alloc — safe for RT)
-    measureLevel(out, numFrames, params_.inputLevelDb);
-
-    // Process effects chain
     if (!params_.masterBypass.load(std::memory_order_relaxed)) {
-        processEffectsChain(out, numFrames);
+        processEffectsChain(samples, numFrames);
     }
 
-    // Process external plugins
     if (pluginHost_) {
-        pluginHost_->process(out, numFrames, sampleRate_);
+        pluginHost_->process(samples, numFrames, sampleRate_);
     }
 
-    // Measure output level
-    measureLevel(out, numFrames, params_.outputLevelDb);
+    measureLevel(samples, numFrames, params_.outputLevelDb);
 
-    // Publish processed samples to a bounded SPSC ring. The audio callback never
-    // enters the JVM, allocates memory, or waits for the consumer. If the consumer
-    // falls behind, this block is dropped rather than blocking the real-time thread.
-    static_cast<void>(ring_.write(out, static_cast<size_t>(numFrames)));
-
-    // The output stream is a timing driver only; playback is handled by the
-    // background PCM pump and SoftwareLoopback.
-    std::fill(out, out + numFrames, 0.0f);
+    // Publish a copy to the bounded SPSC ring. The microphone callback never
+    // enters the JVM, allocates, or waits for the non-real-time PCM consumer.
+    static_cast<void>(ring_.write(samples, static_cast<size_t>(numFrames)));
 
     return oboe::DataCallbackResult::Continue;
 }
@@ -274,7 +277,17 @@ void AudioEngine::onErrorAfterClose(oboe::AudioStream* stream, oboe::Result erro
     nanosleep(&sleep_ts, nullptr);
 
     closeStreams();
-    openStreams();
+    if (openStreams()) {
+        running_.store(true, std::memory_order_release);
+        const oboe::Result result = inputStream_->requestStart();
+        if (result != oboe::Result::OK) {
+            LOGE("Input stream restart failed: %s", oboe::convertToText(result));
+            running_.store(false, std::memory_order_release);
+            closeStreams();
+        }
+    } else {
+        running_.store(false, std::memory_order_release);
+    }
 }
 
 void AudioEngine::measureLevel(const float* buf, int32_t frames, std::atomic<float>& out) {
@@ -289,6 +302,8 @@ void AudioEngine::measureLevel(const float* buf, int32_t frames, std::atomic<flo
 
 // ─── Effects chain dispatch ───────────────────────────────────────────────────
 void AudioEngine::processEffectsChain(float* buf, int32_t frames) {
+    dsp_inputCleanup(buf, frames);
+
     if (params_.gateEnabled.load(std::memory_order_relaxed))
         dsp_noiseGate(buf, frames);
 
@@ -383,6 +398,39 @@ void AudioEngine::dsp_pitchShift(float* buf, int32_t frames) {
                             (kPitchFifoCapacity - 1)];
     }
     pitchFifoTail_ += static_cast<size_t>(frames);
+}
+
+// ─── Input cleanup: low-frequency handling rumble + isolated digital clicks ─
+void AudioEngine::dsp_inputCleanup(float* buf, int32_t frames) {
+    if (frames <= 0) return;
+
+    // Replace only a very narrow, isolated full-scale impulse whose two neighbors
+    // agree. This avoids smoothing ordinary consonant attacks or voiced transients.
+    float previous = cleanupPrevSample_;
+    for (int i = 0; i < frames; ++i) {
+        const float current = buf[i];
+        const float next = (i + 1 < frames) ? buf[i + 1] : current;
+        const bool isolatedClick =
+            std::fabs(current) > 0.72f &&
+            std::fabs(current - previous) > 0.58f &&
+            std::fabs(current - next) > 0.58f &&
+            std::fabs(previous - next) < 0.12f;
+        const float cleaned = isolatedClick ? 0.5f * (previous + next) : current;
+        buf[i] = cleaned;
+        previous = cleaned;
+    }
+    cleanupPrevSample_ = buf[frames - 1];
+
+    // First-order 72 Hz high-pass: reduces handling/footstep thumps and DC rumble
+    // without aggressively thinning the lower fundamentals of a male voice.
+    for (int i = 0; i < frames; ++i) {
+        const float input = buf[i];
+        const float output = highpassAlpha_ *
+            (highpassPrevOutput_ + input - highpassPrevInput_);
+        highpassPrevInput_ = input;
+        highpassPrevOutput_ = output;
+        buf[i] = output;
+    }
 }
 
 // ─── Noise Gate ──────────────────────────────────────────────────────────────
