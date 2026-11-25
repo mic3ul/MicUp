@@ -32,6 +32,7 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
     val compState   by vm.compState.collectAsState()
     val reverbState by vm.reverbState.collectAsState()
     val pitchState  by vm.pitchState.collectAsState()
+    val vocalShine  by vm.vocalShine.collectAsState()
     val bypass      by vm.masterBypass.collectAsState()
     val monitoring  by vm.monitoringEnabled.collectAsState()
     val presets     by vm.presets.collectAsState()
@@ -251,6 +252,22 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                         onGainChange = { vm.setEqBand(i, it) },
                     )
                 }
+            }
+        }
+
+        // ── Vocal Shine ─────────────────────────────────────────────────────
+        EffectCard(
+            title = "Vocal Shine",
+            enabled = vocalShine > 0.001f,
+            onToggle = { enabled -> vm.setVocalShine(if (enabled) 0.35f else 0f) },
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Adds gentle upper harmonics and controls sharp sibilants for a fuller singing tone. It does not change pitch or create vocal runs.",
+                    fontSize = 10.sp,
+                    color = StudioColors.TextMuted,
+                )
+                ParamSlider("Intensity", vocalShine, vm::setVocalShine, 0f..1f)
             }
         }
 
