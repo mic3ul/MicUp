@@ -31,4 +31,4 @@ add_library(weirdo_opus_jni SHARED
 
 target_compile_features(weirdo_opus_jni PRIVATE cxx_std_17)
 target_compile_options(weirdo_opus_jni PRIVATE -Wall -Wextra -Werror)
-target_link_libraries(weirdo_opus_jni PRIVATE opus log)
+target_link_libraries(weirdo_opus_jni PRIVATE opus log m)
