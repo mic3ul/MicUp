@@ -178,6 +178,14 @@ public final class OggOpusMuxer implements Closeable {
         output.close();
     }
 
+    /** Closes an incomplete stream without writing an EOS page. */
+    public synchronized void abort() throws IOException {
+        if (finished) return;
+        pending = null;
+        finished = true;
+        output.close();
+    }
+
     @Override
     public synchronized void close() throws IOException {
         finish();
