@@ -115,7 +115,7 @@ public final class OggOpusMuxer implements Closeable {
             if (packet.length < 2) {
                 throw new IllegalArgumentException("Opus code-3 packet has no frame-count byte");
             }
-            frameCount = packet[1] & 0x3f;
+            frameCount = (packet[1] >>> 2) & 0x3f;
             if (frameCount < 1 || frameCount > 48) {
                 throw new IllegalArgumentException("Invalid Opus frame count: " + frameCount);
             }
