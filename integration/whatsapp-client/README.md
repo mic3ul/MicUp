@@ -35,4 +35,17 @@ The writer was validated on the development host with actual Opus packets: `ffpr
 **Important:** this is a container writer, not an Opus encoder or a complete WhatsApp recorder. PCM must still be packetized into supported Opus frame sizes, encoded, and routed here. WhatsApp's exact pause/resume, waveform and file-metadata contract still needs to be matched before this can replace `OpusRecorder`.
 
 
+## Native Opus encoder and processed voice-note pipeline
+
+The client AAR now builds a separate JNI Opus encoder from the official Xiph Opus 1.6.1 source archive. The download is pinned with the published SHA-256 value so a future upstream branch change cannot silently alter the codec source.
+
+- `OpusPcmEncoder` encodes signed PCM16 mono at 48 kHz in 20 ms (960-sample) frames. It uses the Opus voice application mode, 20 kb/s default target bitrate, complexity 5, and queries the encoder's actual lookahead for the Ogg pre-skip.
+- `PcmFrameAccumulator` joins variable-sized AIDL chunks, retains incomplete frames across pauses, and pads only the last partial frame.
+- `ProcessedOpusRecorder` encodes the frames, writes Ogg Opus packets, and sets the EOS granule to the real captured sample count so final-frame padding is not played.
+- `ProcessedVoiceNoteSession` coordinates the AIDL client and recorder lifecycle. It waits in READY until the PTT hook calls `start()`; pause/resume toggle forwarding without resetting the Opus encoder; `finish()` finalizes the file; `cancel()` deletes an unfinished file.
+
+The encoder API requires complete supported Opus frames; at 48 kHz, 960 samples is a 20 ms frame. The implementation keeps encoding off the real-time audio callback and processes PCM on the dedicated pipe reader thread. See the [Opus encoder API](https://opus-codec.org/docs/html_api/group__opusencoder.html).
+
+**Integration boundary:** these classes form a compiled PCM-to-Opus/Ogg pipeline, but they are not yet injected into the WhatsApp PTT controller or substituted for WhatsApp's `OpusRecorder`. The target-version PTT class must call `ProcessedVoiceNoteSession` at prepare/start/pause/resume/stop/cancel and must preserve WhatsApp's waveform/page callbacks and file metadata. No end-to-end WhatsApp send test has been claimed.
+
 The muxer unit tests check page boundaries, sequence numbers, granule positions, BOS/EOS flags, the exact-255-byte lacing edge case, TOC duration parsing, and CRCs. CI runs `:whatsapp-client:testDebugUnitTest` alongside the Android builds.
