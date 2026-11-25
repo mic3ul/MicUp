@@ -23,8 +23,10 @@ object SoftwareLoopback {
     private var running = false
     private var focusRequest: AudioFocusRequest? = null
 
-    // Lock-free float queue — audio callback offers, worker thread drains
-    private val queue = ArrayBlockingQueue<FloatArray>(QUEUE_CAP)
+    // Bounded hand-off queue. Keep the valid sample count with each pooled buffer;
+    // pooled arrays can be larger than the current audio burst.
+    private data class MonitorBlock(val samples: FloatArray, val sampleCount: Int)
+    private val queue = ArrayBlockingQueue<MonitorBlock>(QUEUE_CAP)
 
     // Buffer pool — reuse allocations to avoid GC pressure every frame
     private val pool  = ArrayBlockingQueue<FloatArray>(QUEUE_CAP * 2)
@@ -64,13 +66,18 @@ object SoftwareLoopback {
             Log.i(TAG, "Worker thread started")
             while (running) {
                 try {
-                    val buf = queue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    val block = queue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
                         ?: continue
-                    if (monitorEnabled) {
-                        monitorTrack?.write(buf, 0, buf.size, AudioTrack.WRITE_BLOCKING)
+                    try {
+                        if (monitorEnabled) {
+                            monitorTrack?.write(
+                                block.samples, 0, block.sampleCount, AudioTrack.WRITE_BLOCKING
+                            )
+                        }
+                    } finally {
+                        // Recycle the storage buffer even if the output device rejects a write.
+                        pool.offer(block.samples)
                     }
-                    // Recycle buffer back to pool — no GC
-                    pool.offer(buf)
                 } catch (_: InterruptedException) { break }
                   catch (e: Exception) { Log.e(TAG, "Worker write error: $e") }
             }
@@ -100,19 +107,19 @@ object SoftwareLoopback {
     // Fast path: grab pooled buffer, copy, offer. Never alloc if pool has one.
     fun writeProcessed(buf: FloatArray, size: Int) {
         if (!running || !monitorEnabled) return
-        // Get buffer from pool or allocate (rare — only first QUEUE_CAP frames)
-        val copy = pool.poll() ?: FloatArray(size)
-        if (copy.size >= size) {
-            System.arraycopy(buf, 0, copy, 0, size)
-        } else {
-            // Pool buffer too small (shouldn't happen) — just copy
-            buf.copyInto(copy, 0, 0, minOf(size, copy.size))
+        // Reuse only buffers large enough for this burst. Never truncate a burst.
+        var copy = pool.poll()
+        if (copy == null || copy.size < size) {
+            copy?.let { pool.offer(it) }
+            copy = FloatArray(size)
         }
-        // Drop-oldest: if queue full, evict oldest and recycle it
-        if (!queue.offer(copy)) {
-            val dropped = queue.poll()   // remove oldest
-            dropped?.let { pool.offer(it) }  // recycle
-            queue.offer(copy)            // now guaranteed space
+        System.arraycopy(buf, 0, copy, 0, size)
+
+        val block = MonitorBlock(copy, size)
+        // Drop-oldest: if queue full, evict its storage buffer and recycle it.
+        if (!queue.offer(block)) {
+            queue.poll()?.let { pool.offer(it.samples) }
+            queue.offer(block)
         }
     }
 
