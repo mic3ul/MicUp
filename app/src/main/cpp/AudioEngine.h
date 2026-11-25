@@ -169,13 +169,7 @@ public:
     // Fixes #5: previously the input stream always opened on whatever the OS considered the
     // default mic, so an external/USB sound card's input could never be selected even though
     // its output could. Safe to call while running — reopens the streams to apply.
-    void setInputDeviceId(int32_t deviceId) {
-        inputDeviceId_.store(deviceId, std::memory_order_relaxed);
-        if (running_.load(std::memory_order_acquire)) {
-            closeStreams();
-            openStreams();
-        }
-    }
+    void setInputDeviceId(int32_t deviceId);
     int32_t getInputDeviceId() const { return inputDeviceId_.load(std::memory_order_relaxed); }
 
     // oboe callbacks
@@ -190,6 +184,7 @@ private:
 
     // DSP (all called from audio thread, no allocations)
     void processEffectsChain(float* buf, int32_t frames);
+    void dsp_inputCleanup(float* buf, int32_t frames);
     void dsp_noiseGate(float* buf, int32_t frames);
     void dsp_eq(float* buf, int32_t frames);
     void dsp_compressor(float* buf, int32_t frames);
@@ -203,7 +198,7 @@ private:
     }
 
     // Streams
-    std::shared_ptr<oboe::AudioStream> inputStream_, outputStream_;
+    std::shared_ptr<oboe::AudioStream> inputStream_;
     std::atomic<bool> running_{false};
 
     // Preferred input device id — see setInputDeviceId() above. oboe::kUnspecified means
@@ -233,6 +228,12 @@ private:
     // ─ Gate state ─
     float gateEnv_  = 0.0f;
     float gateRms_  = 0.0f;
+
+    // Input cleanup state: high-pass rumble control and single-sample de-clicker.
+    float cleanupPrevSample_ = 0.0f;
+    float highpassPrevInput_ = 0.0f;
+    float highpassPrevOutput_ = 0.0f;
+    float highpassAlpha_ = 0.991f;
 
     // ─ EQ state ─
     static constexpr int kEqBands = 10;
