@@ -55,7 +55,7 @@ jobs:
           gradle-version: "8.6"
 
       - name: Build debug APK and WhatsApp PCM client AAR
-        run: gradle :app:assembleDebug :whatsapp-client:assembleRelease --no-daemon
+        run: gradle :app:assembleDebug :whatsapp-client:assembleRelease :whatsapp-client:testDebugUnitTest --no-daemon
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
