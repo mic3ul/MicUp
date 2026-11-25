@@ -82,6 +82,7 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
      * as the PCM format has been validated on the binder callback thread.
      */
     public synchronized void start() {
+        if (state == State.RECORDING) return;
         if (state == State.CONNECTING) {
             startRequested = true;
             return;
@@ -98,6 +99,7 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
 
     /** Stops forwarding PCM without flushing or resetting the Opus encoder. */
     public synchronized void pause() {
+        if (state == State.PAUSED) return;
         if (state == State.CONNECTING && startRequested) {
             pauseRequested = true;
             return;
@@ -110,6 +112,7 @@ public final class ProcessedVoiceNoteSession implements AutoCloseable {
 
     /** Resumes from the existing encoder state and any pending partial frame. */
     public synchronized void resume() {
+        if (state == State.RECORDING) return;
         requireState(State.PAUSED);
         recorder.resume();
         state = State.RECORDING;
