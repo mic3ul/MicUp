@@ -83,23 +83,24 @@ class PresetManager @Inject constructor(
                 isBuiltIn = true,
                 effects = EffectState(
                     gateEnabled   = true,
-                    gateThreshold = -54f,
-                    gateAttack    = 8f,
-                    gateRelease   = 220f,
+                    gateThreshold = -52f,
+                    gateAttack    = 5f,
+                    gateRelease   = 260f,
                     eqEnabled     = true,
                     // 31, 63, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz
-                    // Trim sub-bass and boxiness, add restrained low-mid warmth,
-                    // then soften the upper presence without losing intelligibility.
-                    eqBands = listOf(-3f, -1f, 1.8f, -1.8f, -0.5f, 0.5f, 1f, -0.8f, -1.5f, -2f),
+                    // Control sub-bass and boxiness, add restrained chest warmth and
+                    // a small intelligibility lift. Keep pitch shifting subtle to reduce
+                    // formant-darkening artifacts from time-domain pitch processing.
+                    eqBands = listOf(-6f, -1f, 1.6f, -1.6f, -0.7f, 0.2f, 1.5f, 0.4f, -0.6f, -1.8f),
                     compEnabled   = true,
-                    compThreshold = -22f,
-                    compRatio     = 2.6f,
-                    compAttack    = 14f,
-                    compRelease   = 140f,
-                    compMakeup    = 1f,
+                    compThreshold = -23.5f,
+                    compRatio     = 2.4f,
+                    compAttack    = 18f,
+                    compRelease   = 170f,
+                    compMakeup    = 1.5f,
                     reverbEnabled = false,
                     pitchEnabled  = true,
-                    pitchSemitones = -2f,
+                    pitchSemitones = -1f,
                 ),
             ),
             Preset(
