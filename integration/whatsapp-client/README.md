@@ -28,8 +28,11 @@ The existing WhatsApp `OpusRecorder` native API has no PCM-frame input method. T
 
 ## Ogg Opus muxer
 
-`OggOpusMuxer.java` writes an Ogg Opus stream from **already encoded Opus packets**. It emits `OpusHead` and `OpusTags`, page sequence numbers, granule positions, lacing values, and Ogg CRC checksums. It holds the final packet until `finish()` so the EOS flag is applied to the final audio page.
+`OggOpusMuxer.java` writes an Ogg Opus stream from **already encoded Opus packets**. It emits `OpusHead` and `OpusTags`, page sequence numbers, granule positions, lacing values, and Ogg CRC checksums. It derives packet duration from the Opus TOC and rejects caller-supplied durations that disagree. It holds the final packet until `finish()` so the EOS flag is applied to the final audio page.
 
 The writer was validated on the development host with actual Opus packets: `ffprobe` identified the output as mono 48 kHz Opus in Ogg, and `ffmpeg` decoded the complete file successfully. The source is Java 8 language/API compatible.
 
 **Important:** this is a container writer, not an Opus encoder or a complete WhatsApp recorder. PCM must still be packetized into supported Opus frame sizes, encoded, and routed here. WhatsApp's exact pause/resume, waveform and file-metadata contract still needs to be matched before this can replace `OpusRecorder`.
+
+
+The muxer unit tests check page boundaries, sequence numbers, granule positions, BOS/EOS flags, the exact-255-byte lacing edge case, TOC duration parsing, and CRCs. CI runs `:whatsapp-client:testDebugUnitTest` alongside the Android builds.
