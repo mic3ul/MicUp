@@ -10,16 +10,18 @@ import java.security.SecureRandom;
 
 /**
  * Minimal Ogg Opus muxer. It accepts already encoded Opus packets; it does not
- * capture audio or encode PCM. One packet is stored per Ogg page.
+ * capture audio or encode PCM. Each Opus packet is written on its own Ogg page.
  */
 public final class OggOpusMuxer implements Closeable {
     private static final int MAX_SEGMENTS = 255;
+    private static final int MAX_PACKET_BYTES = 65024;
     private static final int CRC_POLY = 0x04C11DB7;
     private static final int[] CRC_TABLE = buildCrcTable();
 
     private static final class Pending {
         final byte[] packet;
         final long granule;
+
         Pending(byte[] packet, long granule) {
             this.packet = packet;
             this.granule = granule;
@@ -39,8 +41,13 @@ public final class OggOpusMuxer implements Closeable {
                         int preSkipAt48k, String vendor) throws IOException {
         if (file == null) throw new IllegalArgumentException("file == null");
         if (inputSampleRate <= 0) throw new IllegalArgumentException("Invalid sample rate");
-        if (channels < 1 || channels > 2) throw new IllegalArgumentException("Opus channels must be 1 or 2");
-        if (preSkipAt48k < 0 || preSkipAt48k > 65535) throw new IllegalArgumentException("Invalid pre-skip");
+        if (channels < 1 || channels > 2) {
+            throw new IllegalArgumentException("Opus channels must be 1 or 2");
+        }
+        if (preSkipAt48k < 0 || preSkipAt48k > 65535) {
+            throw new IllegalArgumentException("Invalid pre-skip");
+        }
+
         this.preSkip = preSkipAt48k;
         this.serial = new SecureRandom().nextInt();
         this.output = new FileOutputStream(file, false);
@@ -48,35 +55,107 @@ public final class OggOpusMuxer implements Closeable {
         writePage(0x00, 0L, makeOpusTags(vendor == null ? "weirdo" : vendor));
     }
 
-    /** durationSamplesAt48k is in the Ogg Opus 48 kHz granule clock (960 = 20 ms). */
-    public synchronized void writePacket(byte[] packet, int durationSamplesAt48k) throws IOException {
+    /**
+     * Writes an encoded Opus packet. The duration argument is expressed on
+     * Ogg's 48 kHz granule clock and must agree with the packet TOC.
+     */
+    public synchronized void writePacket(byte[] packet, int durationSamplesAt48k)
+            throws IOException {
         ensureOpen();
-        if (packet == null || packet.length == 0) throw new IllegalArgumentException("Empty Opus packet");
-        if (durationSamplesAt48k <= 0) throw new IllegalArgumentException("Invalid packet duration");
-        if (packet.length > 65024) throw new IllegalArgumentException("Packet too large for one Ogg page");
+        if (packet == null || packet.length == 0) {
+            throw new IllegalArgumentException("Empty Opus packet");
+        }
+        if (packet.length > MAX_PACKET_BYTES) {
+            throw new IllegalArgumentException("Packet too large for one Ogg page");
+        }
+
+        int packetDuration = getPacketDurationSamplesAt48k(packet);
+        if (durationSamplesAt48k != packetDuration) {
+            throw new IllegalArgumentException(
+                    "Duration does not match Opus TOC: expected " + packetDuration
+                            + " samples at 48 kHz, received " + durationSamplesAt48k);
+        }
+
         if (pending != null) writePage(0x00, pending.granule, pending.packet);
-        totalSamples += durationSamplesAt48k;
+
+        totalSamples += packetDuration;
         pending = new Pending(packet.clone(), preSkip + totalSamples);
     }
 
-    public synchronized long getWrittenPageCount() { return pages; }
-    public synchronized long getGranulePosition() { return preSkip + totalSamples; }
+    /**
+     * Derives packet duration from the Opus TOC. This prevents incorrect
+     * granule positions caused by passing an arbitrary duration to writePacket.
+     */
+    public static int getPacketDurationSamplesAt48k(byte[] packet) {
+        if (packet == null || packet.length == 0) {
+            throw new IllegalArgumentException("Empty Opus packet");
+        }
+
+        int toc = packet[0] & 0xff;
+        int config = toc >>> 3;
+        int frameCode = toc & 0x03;
+        int samplesPerFrame;
+
+        if (config < 12) {
+            int[] silkDurations = {480, 960, 1920, 2880};
+            samplesPerFrame = silkDurations[config & 0x03];
+        } else if (config < 16) {
+            samplesPerFrame = (config & 0x02) == 0 ? 480 : 960;
+        } else {
+            int[] celtDurations = {120, 240, 480, 960};
+            samplesPerFrame = celtDurations[config & 0x03];
+        }
+
+        final int frameCount;
+        if (frameCode == 0) {
+            frameCount = 1;
+        } else if (frameCode == 1 || frameCode == 2) {
+            frameCount = 2;
+        } else {
+            if (packet.length < 2) {
+                throw new IllegalArgumentException("Opus code-3 packet has no frame-count byte");
+            }
+            frameCount = packet[1] & 0x3f;
+            if (frameCount < 1 || frameCount > 48) {
+                throw new IllegalArgumentException("Invalid Opus frame count: " + frameCount);
+            }
+        }
+
+        int duration = samplesPerFrame * frameCount;
+        if (duration > 5760) {
+            throw new IllegalArgumentException("Opus packet duration exceeds 120 ms");
+        }
+        return duration;
+    }
+
+    public synchronized long getWrittenPageCount() {
+        return pages;
+    }
+
+    public synchronized long getGranulePosition() {
+        return preSkip + totalSamples;
+    }
 
     public synchronized void finish() throws IOException {
         if (finished) return;
+
         if (pending != null) {
             writePage(0x04, pending.granule, pending.packet);
             pending = null;
         } else {
             writeEmptyEosPage(preSkip + totalSamples);
         }
+
         output.flush();
         output.getFD().sync();
         finished = true;
         output.close();
     }
 
-    @Override public void close() throws IOException { finish(); }
+    @Override
+    public synchronized void close() throws IOException {
+        finish();
+    }
 
     private void ensureOpen() throws IOException {
         if (finished) throw new IOException("Ogg Opus stream already finished");
@@ -142,6 +221,7 @@ public final class OggOpusMuxer implements Closeable {
         u32(b, sequence++);
         u32(b, 0);
         b.write(0);
+
         byte[] page = b.toByteArray();
         putU32(page, 22, crc(page));
         output.write(page);
