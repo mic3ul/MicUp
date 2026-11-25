@@ -77,6 +77,7 @@ class AudioViewModel @Inject constructor(
     private val _reverbState = MutableStateFlow(ReverbState())
     private val _pitchState  = MutableStateFlow(PitchState())
     private val _masterBypass = MutableStateFlow(false)
+    private val _vocalShine = MutableStateFlow(0f)
 
     val gateState:    StateFlow<GateState>    = _gateState
     val eqState:      StateFlow<EqState>      = _eqState
@@ -84,6 +85,7 @@ class AudioViewModel @Inject constructor(
     val reverbState:  StateFlow<ReverbState>  = _reverbState
     val pitchState:   StateFlow<PitchState>   = _pitchState
     val masterBypass: StateFlow<Boolean>      = _masterBypass
+    val vocalShine: StateFlow<Float> = _vocalShine
 
     private val _selectedPreset = MutableStateFlow<Preset?>(null)
     val selectedPreset: StateFlow<Preset?> = _selectedPreset
@@ -191,6 +193,13 @@ class AudioViewModel @Inject constructor(
         audioEngine.setPitchSemitones(st)
     }
 
+    // Singing-oriented harmonic sheen; zero is a transparent bypass.
+    fun setVocalShine(amount: Float) {
+        val safeAmount = amount.coerceIn(0f, 1f)
+        _vocalShine.value = safeAmount
+        audioEngine.setVocalShine(safeAmount)
+    }
+
     // ── Plugin chain ──────────────────────────────────────────────────────────
     fun addPlugin(descriptor: PluginDescriptor) {
         viewModelScope.launch {
@@ -231,6 +240,7 @@ class AudioViewModel @Inject constructor(
         setReverbEnabled(e.reverbEnabled); setReverbMix(e.reverbMix)
         setReverbRoom(e.reverbRoom);       setReverbDamp(e.reverbDamp)
         setPitchEnabled(e.pitchEnabled);   setPitchSemitones(e.pitchSemitones)
+        setVocalShine(e.vocalShine)
         _gateState.value   = GateState(e.gateEnabled, e.gateThreshold, e.gateAttack, e.gateRelease)
         _eqState.value     = EqState(e.eqEnabled, e.eqBands)
         _compState.value   = CompState(e.compEnabled, e.compThreshold, e.compRatio, e.compAttack, e.compRelease, e.compMakeup)
@@ -260,6 +270,7 @@ class AudioViewModel @Inject constructor(
                 reverbDamp    = _reverbState.value.damping,
                 pitchEnabled  = _pitchState.value.enabled,
                 pitchSemitones = _pitchState.value.semitones,
+                vocalShine = _vocalShine.value,
             ),
         )
         viewModelScope.launch { presetManager.save(preset) }
