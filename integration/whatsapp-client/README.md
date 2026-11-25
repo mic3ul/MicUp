@@ -23,7 +23,7 @@ This folder contains the **consumer-side** AIDL client to be added to a modified
 3. Use the callback to feed a replacement recorder backend. Do not call `AudioRecord`, Oboe, or OpenSL ES in parallel.
 4. Call `setForwardingEnabled(true)` only after PTT `start()`; set it to `false` on pause and stop so preparation audio is drained but never written into the voice note. Close the client on cancel/release.
 
-The existing WhatsApp `OpusRecorder` native API has no PCM-frame input method. This client establishes the transport boundary only; it does **not** by itself modify Opus encoding or create a valid WhatsApp voice note. A replacement `OpusRecorder` backend still needs to preserve the `.opus` output, Ogg page/resume state, waveform metadata, and callbacks.
+The existing WhatsApp `OpusRecorder` native API has no PCM-frame input method. `ProcessedPcmClient` itself is only the transport layer. A separate JNI Opus encoder and Ogg writer are now included in this AAR, but the target WhatsApp PTT recorder has not yet been patched to use them; waveform metadata, the exact callback contract, and substitution of the original native `OpusRecorder` remain integration work.
 
 
 ## Ogg Opus muxer
@@ -32,7 +32,7 @@ The existing WhatsApp `OpusRecorder` native API has no PCM-frame input method. T
 
 The writer was validated on the development host with actual Opus packets: `ffprobe` identified the output as mono 48 kHz Opus in Ogg, and `ffmpeg` decoded the complete file successfully. The source is Java 8 language/API compatible.
 
-**Important:** this is a container writer, not an Opus encoder or a complete WhatsApp recorder. PCM must still be packetized into supported Opus frame sizes, encoded, and routed here. WhatsApp's exact pause/resume, waveform and file-metadata contract still needs to be matched before this can replace `OpusRecorder`.
+**Important:** `OggOpusMuxer` is only the container writer, while `OpusPcmEncoder` and `ProcessedOpusRecorder` form the separate encoding pipeline. This pipeline is not yet connected to WhatsApp's proprietary PTT controller; exact pause/resume, waveform and file-metadata behavior must still be matched before replacing `OpusRecorder`.
 
 
 ## Native Opus encoder and processed voice-note pipeline
