@@ -55,8 +55,8 @@ class RvcOnnxConverter private constructor(
     data class ConvertedAudio(val samples: FloatArray, val sampleRate: Int)
 
     companion object {
-        const val MAX_INPUT_SECONDS = 30
-        private const val MAX_ONNX_BYTES = 800L * 1024L * 1024L
+        const val MAX_INPUT_SECONDS = 15
+        private const val MAX_ONNX_BYTES = 450L * 1024L * 1024L
         private const val TAG = "WeirdoRVC"
 
         fun load(context: Context, uris: ModelUris): RvcOnnxConverter {
