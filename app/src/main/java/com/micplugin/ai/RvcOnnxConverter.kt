@@ -141,24 +141,53 @@ class RvcOnnxConverter private constructor(
         }
 
         private fun cacheModel(context: Context, uri: Uri, prefix: String): File {
-            val size = context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
-            require(size in 1..MAX_ONNX_BYTES) {
-                "$prefix model size is unavailable or exceeds the 800 MiB safety limit."
+            val reportedSize = context.contentResolver.openFileDescriptor(uri, "r")
+                ?.use { it.statSize } ?: -1L
+            require(reportedSize <= MAX_ONNX_BYTES) {
+                "$prefix model exceeds the 450 MiB safety limit."
             }
+
             val key = Integer.toHexString(uri.toString().hashCode())
             val file = File(context.filesDir, "ai-models/$prefix-$key.onnx")
-            if (file.exists() && file.length() == size) return file
+            if (file.exists() && file.length() > 0L &&
+                (reportedSize <= 0L || file.length() == reportedSize)
+            ) return file
+
             file.parentFile?.mkdirs()
             val temporary = File(file.parentFile, file.name + ".part")
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                temporary.outputStream().buffered().use { output -> input.copyTo(output, 128 * 1024) }
-            } ?: error("Cannot read selected model file: $uri")
-            require(temporary.length() == size) { "Model copy was incomplete." }
-            if (!temporary.renameTo(file)) {
-                temporary.copyTo(file, overwrite = true)
-                temporary.delete()
+            var copied = 0L
+            try {
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    temporary.outputStream().buffered().use { output ->
+                        val buffer = ByteArray(128 * 1024)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            copied += count
+                            require(copied <= MAX_ONNX_BYTES) {
+                                "$prefix model exceeds the 450 MiB safety limit."
+                            }
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                } ?: error("Cannot read selected model file: $uri")
+
+                require(copied > 0L) { "Selected model file is empty." }
+                if (reportedSize > 0L) {
+                    require(copied == reportedSize) {
+                        "Model copy is incomplete: expected $reportedSize bytes, copied $copied."
+                    }
+                }
+
+                if (!temporary.renameTo(file)) {
+                    temporary.copyTo(file, overwrite = true)
+                    temporary.delete()
+                }
+                return file
+            } catch (error: Throwable) {
+                runCatching { temporary.delete() }
+                throw error
             }
-            return file
         }
     }
 
