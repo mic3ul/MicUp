@@ -1,6 +1,7 @@
 package com.micplugin.ui
 
 import android.content.Context
+import android.media.MediaPlayer
 import android.net.Uri
 import com.micplugin.ai.RvcOnnxConverter
 import com.micplugin.ai.RvcWavIo
@@ -70,6 +71,7 @@ data class RvcStudioState(
     val inputUri: Uri? = null,
     val isConverting: Boolean = false,
     val progress: Float = 0f,
+    val isPreviewing: Boolean = false,
     val outputClip: RvcOnnxConverter.ConvertedAudio? = null,
     val message: String? = null,
     val error: String? = null,
@@ -126,6 +128,7 @@ class AudioViewModel @Inject constructor(
     val rvcStudio: StateFlow<RvcStudioState> = _rvcStudio
     private var rvcConverter: RvcOnnxConverter? = null
     private var loadedRvcModelKey: List<String>? = null
+    private var rvcPreviewPlayer: MediaPlayer? = null
 
     init {
         viewModelScope.launch { presetManager.loadAll() }
@@ -223,6 +226,66 @@ class AudioViewModel @Inject constructor(
         }
     }
 
+    // ── Preview the converted result locally before exporting it ─────────────
+    fun previewRvcOutput() {
+        val clip = _rvcStudio.value.outputClip ?: return
+        viewModelScope.launch {
+            try {
+                stopRvcPreview()
+                val previewFile = withContext(Dispatchers.IO) {
+                    val file = File(appContext.cacheDir, "weirdo-ai-preview.wav")
+                    file.outputStream().buffered().use { output ->
+                        RvcWavIo.writePcm16Mono(output, clip)
+                    }
+                    file
+                }
+                val player = MediaPlayer()
+                rvcPreviewPlayer = player
+                player.setOnPreparedListener { ready ->
+                    ready.start()
+                    _rvcStudio.value = _rvcStudio.value.copy(isPreviewing = true, error = null)
+                }
+                player.setOnCompletionListener { completed ->
+                    runCatching { completed.release() }
+                    if (rvcPreviewPlayer === completed) rvcPreviewPlayer = null
+                    _rvcStudio.value = _rvcStudio.value.copy(isPreviewing = false)
+                }
+                player.setOnErrorListener { failed, what, extra ->
+                    runCatching { failed.release() }
+                    if (rvcPreviewPlayer === failed) rvcPreviewPlayer = null
+                    _rvcStudio.value = _rvcStudio.value.copy(
+                        isPreviewing = false,
+                        error = "Preview playback failed ($what/$extra)."
+                    )
+                    true
+                }
+                player.setDataSource(previewFile.absolutePath)
+                player.prepareAsync()
+            } catch (error: Throwable) {
+                stopRvcPreview()
+                _rvcStudio.value = _rvcStudio.value.copy(
+                    isPreviewing = false,
+                    error = error.message ?: "Could not preview converted audio."
+                )
+            }
+        }
+    }
+
+    fun stopRvcPreview() {
+        val player = rvcPreviewPlayer
+        rvcPreviewPlayer = null
+        if (player != null) {
+            runCatching {
+                if (player.isPlaying) player.stop()
+            }
+            runCatching { player.reset() }
+            runCatching { player.release() }
+        }
+        if (_rvcStudio.value.isPreviewing) {
+            _rvcStudio.value = _rvcStudio.value.copy(isPreviewing = false)
+        }
+    }
+
     fun saveRvcOutput(uri: Uri) {
         val clip = _rvcStudio.value.outputClip ?: return
         viewModelScope.launch(Dispatchers.IO) {
@@ -244,6 +307,7 @@ class AudioViewModel @Inject constructor(
     }
 
     override fun onCleared() {
+        stopRvcPreview()
         closeRvcConverter()
         super.onCleared()
     }
