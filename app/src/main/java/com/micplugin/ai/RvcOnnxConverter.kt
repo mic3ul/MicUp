@@ -38,6 +38,7 @@ class RvcOnnxConverter private constructor(
     private val rmvpe: OrtSession?,
     private val metadata: Metadata,
     private val outputName: String,
+    private val sessionOptions: OrtSession.SessionOptions,
 ) : Closeable {
 
     data class ModelUris(val synth: Uri, val embedder: Uri, val rmvpe: Uri)
@@ -107,15 +108,14 @@ class RvcOnnxConverter private constructor(
                 }
 
                 return RvcOnnxConverter(
-                    synthSession, embedSession, pitchSession, meta, output
+                    synthSession, embedSession, pitchSession, meta, output, options
                 )
             } catch (error: Throwable) {
                 runCatching { pitchSession?.close() }
                 runCatching { embedSession?.close() }
                 runCatching { synthSession?.close() }
+                runCatching { options.close() }
                 throw error
-            } finally {
-                options.close()
             }
         }
 
@@ -334,6 +334,7 @@ class RvcOnnxConverter private constructor(
         runCatching { rmvpe?.close() }
         runCatching { embedder.close() }
         runCatching { synth.close() }
+        runCatching { sessionOptions.close() }
     }
 }
 
