@@ -368,10 +368,24 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                         Text(if (rvcStudio.isConverting) "Converting…" else "Convert with AI", fontSize = 11.sp)
                     }
                     OutlinedButton(
+                        onClick = { vm.previewRvcOutput() },
+                        enabled = !rvcStudio.isConverting && rvcStudio.outputClip != null && !rvcStudio.isPreviewing,
+                    ) {
+                        Text("Preview", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
                         onClick = { rvcSavePicker.launch("weirdo-ai-voice.wav") },
                         enabled = !rvcStudio.isConverting && rvcStudio.outputClip != null,
                     ) {
-                        Text("Save WAV", fontSize = 11.sp)
+                        Text("Save", fontSize = 11.sp)
+                    }
+                }
+                if (rvcStudio.isPreviewing) {
+                    OutlinedButton(
+                        onClick = vm::stopRvcPreview,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Stop preview", fontSize = 10.sp)
                     }
                 }
                 Text(
