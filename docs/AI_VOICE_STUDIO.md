@@ -6,7 +6,7 @@ The AI Voice Studio is an **offline, clip-based RVC voice-conversion path** usin
 
 - PCM WAV, 16-bit signed integer, mono or stereo
 - 8 kHz to 96 kHz input; stereo is downmixed to mono
-- Clips from 1 second through 30 seconds
+- Clips from 1 second through 15 seconds
 - Output is mono PCM16 WAV at the synthesizer model's configured sample rate
 
 The current UI deliberately limits clip length to reduce memory pressure on Android handsets.
@@ -31,7 +31,7 @@ RVC changes timbre toward the speaker represented by the selected synthesizer. A
 
 - ONNX Runtime is configured for two intra-op threads and one inter-op thread.
 - Model files are copied to the app's private model cache and loaded from file paths.
-- Model size is capped at 800 MiB per file.
+- Model size is capped at 450 MiB per file.
 - Clip conversion runs off the UI thread; it is not wired into WhatsApp PTT or the live audio callback.
 - Actual speed and memory use depend on the model exports and device. No real-device performance claim is made until tested on the target handset.
 
