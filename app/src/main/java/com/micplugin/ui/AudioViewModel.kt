@@ -1,5 +1,12 @@
 package com.micplugin.ui
 
+import android.content.Context
+import android.net.Uri
+import com.micplugin.ai.RvcOnnxConverter
+import com.micplugin.ai.RvcWavIo
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.micplugin.audio.AudioEngine
@@ -18,6 +25,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.util.UUID
+import java.io.IOException
 import javax.inject.Inject
 
 data class GateState(
@@ -53,6 +61,22 @@ data class PitchState(
     val semitones: Float = 0f,
 )
 
+enum class RvcModelSlot { SYNTHESIZER, CONTENT_ENCODER, PITCH_EXTRACTOR }
+
+data class RvcStudioState(
+    val synthUri: Uri? = null,
+    val embedderUri: Uri? = null,
+    val rmvpeUri: Uri? = null,
+    val inputUri: Uri? = null,
+    val isConverting: Boolean = false,
+    val progress: Float = 0f,
+    val outputClip: RvcOnnxConverter.ConvertedAudio? = null,
+    val message: String? = null,
+    val error: String? = null,
+) {
+    val modelsReady: Boolean get() = synthUri != null && embedderUri != null && rmvpeUri != null
+}
+
 @HiltViewModel
 class AudioViewModel @Inject constructor(
     private val audioEngine: AudioEngine,
@@ -61,6 +85,7 @@ class AudioViewModel @Inject constructor(
     private val virtualMicService: VirtualMicService,
     private val shizukuManager: ShizukuManager,
     private val pluginPathPrefs: PluginPathPrefs,
+    @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
     val levels:      StateFlow<AudioLevels>    = audioEngine.levels
@@ -90,9 +115,137 @@ class AudioViewModel @Inject constructor(
     private val _selectedPreset = MutableStateFlow<Preset?>(null)
     val selectedPreset: StateFlow<Preset?> = _selectedPreset
 
+    private val aiPrefs = appContext.getSharedPreferences("weirdo_ai_voice", Context.MODE_PRIVATE)
+    private val _rvcStudio = MutableStateFlow(
+        RvcStudioState(
+            synthUri = aiPrefs.getString("synth_uri", null)?.let(Uri::parse),
+            embedderUri = aiPrefs.getString("embedder_uri", null)?.let(Uri::parse),
+            rmvpeUri = aiPrefs.getString("rmvpe_uri", null)?.let(Uri::parse),
+        )
+    )
+    val rvcStudio: StateFlow<RvcStudioState> = _rvcStudio
+    private var rvcConverter: RvcOnnxConverter? = null
+    private var loadedRvcModelKey: List<String>? = null
+
     init {
         viewModelScope.launch { presetManager.loadAll() }
         viewModelScope.launch { pluginManager.scanAll() }
+    }
+
+    // ── Neural RVC voice conversion (offline clips, not live mic processing) ──
+    fun setRvcModel(slot: RvcModelSlot, uri: Uri) {
+        if (_rvcStudio.value.isConverting) return
+        runCatching {
+            appContext.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        val key = when (slot) {
+            RvcModelSlot.SYNTHESIZER -> "synth_uri"
+            RvcModelSlot.CONTENT_ENCODER -> "embedder_uri"
+            RvcModelSlot.PITCH_EXTRACTOR -> "rmvpe_uri"
+        }
+        aiPrefs.edit().putString(key, uri.toString()).apply()
+        closeRvcConverter()
+        _rvcStudio.value = when (slot) {
+            RvcModelSlot.SYNTHESIZER -> _rvcStudio.value.copy(synthUri = uri, outputClip = null, error = null, message = "Synthesizer model selected.")
+            RvcModelSlot.CONTENT_ENCODER -> _rvcStudio.value.copy(embedderUri = uri, outputClip = null, error = null, message = "Content encoder selected.")
+            RvcModelSlot.PITCH_EXTRACTOR -> _rvcStudio.value.copy(rmvpeUri = uri, outputClip = null, error = null, message = "Pitch extractor selected.")
+        }
+    }
+
+    fun setRvcInput(uri: Uri) {
+        runCatching {
+            appContext.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        _rvcStudio.value = _rvcStudio.value.copy(
+            inputUri = uri, outputClip = null, error = null, message = "Source audio selected."
+        )
+    }
+
+    fun convertRvcClip(pitchShiftSemitones: Int = 0) {
+        val current = _rvcStudio.value
+        if (current.isConverting) return
+        val synthUri = current.synthUri
+        val embedderUri = current.embedderUri
+        val rmvpeUri = current.rmvpeUri
+        val inputUri = current.inputUri
+        if (synthUri == null || embedderUri == null || rmvpeUri == null || inputUri == null) {
+            _rvcStudio.value = current.copy(error = "Choose the three RVC ONNX models and a source WAV first.")
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            _rvcStudio.value = _rvcStudio.value.copy(
+                isConverting = true, progress = 0f, outputClip = null,
+                error = null, message = "Loading neural models…"
+            )
+            try {
+                val clip = appContext.contentResolver.openInputStream(inputUri)?.use {
+                    RvcWavIo.readPcm16(it)
+                } ?: throw IOException("Cannot open the selected WAV file.")
+                val modelKey = listOf(synthUri.toString(), embedderUri.toString(), rmvpeUri.toString())
+                val converter = if (rvcConverter == null || loadedRvcModelKey != modelKey) {
+                    closeRvcConverter()
+                    RvcOnnxConverter.load(
+                        appContext,
+                        RvcOnnxConverter.ModelUris(synthUri, embedderUri, rmvpeUri)
+                    ).also {
+                        rvcConverter = it
+                        loadedRvcModelKey = modelKey
+                    }
+                } else rvcConverter!!
+
+                _rvcStudio.value = _rvcStudio.value.copy(message = "Converting voice with RVC…")
+                val converted = withContext(Dispatchers.Default) {
+                    converter.convert(clip.samples, clip.sampleRate, pitchShiftSemitones) { value ->
+                        _rvcStudio.value = _rvcStudio.value.copy(progress = value)
+                    }
+                }
+                _rvcStudio.value = _rvcStudio.value.copy(
+                    isConverting = false,
+                    progress = 1f,
+                    outputClip = converted,
+                    message = "AI voice conversion complete. Preview or save the WAV."
+                )
+            } catch (error: Throwable) {
+                closeRvcConverter()
+                _rvcStudio.value = _rvcStudio.value.copy(
+                    isConverting = false,
+                    progress = 0f,
+                    outputClip = null,
+                    error = error.message ?: error.javaClass.simpleName,
+                    message = null
+                )
+            }
+        }
+    }
+
+    fun saveRvcOutput(uri: Uri) {
+        val clip = _rvcStudio.value.outputClip ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                appContext.contentResolver.openOutputStream(uri, "w")?.use {
+                    RvcWavIo.writePcm16Mono(it, clip)
+                } ?: throw IOException("Cannot create the destination WAV file.")
+                _rvcStudio.value = _rvcStudio.value.copy(message = "Converted WAV saved successfully.", error = null)
+            } catch (error: Throwable) {
+                _rvcStudio.value = _rvcStudio.value.copy(error = error.message ?: "Save failed.")
+            }
+        }
+    }
+
+    private fun closeRvcConverter() {
+        runCatching { rvcConverter?.close() }
+        rvcConverter = null
+        loadedRvcModelKey = null
+    }
+
+    override fun onCleared() {
+        closeRvcConverter()
+        super.onCleared()
     }
 
     // ── Engine control ─────────────────────────────────────────────────────────
