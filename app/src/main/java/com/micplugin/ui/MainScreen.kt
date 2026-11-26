@@ -1,6 +1,8 @@
 package com.micplugin.ui
 
 import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
@@ -33,6 +35,7 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
     val reverbState by vm.reverbState.collectAsState()
     val pitchState  by vm.pitchState.collectAsState()
     val vocalShine  by vm.vocalShine.collectAsState()
+    val rvcStudio   by vm.rvcStudio.collectAsState()
     val bypass      by vm.masterBypass.collectAsState()
     val monitoring  by vm.monitoringEnabled.collectAsState()
     val presets     by vm.presets.collectAsState()
@@ -42,6 +45,22 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
 
     var showSaveDialog by remember { mutableStateOf(false) }
     var presetName     by remember { mutableStateOf("") }
+
+    val rvcSynthPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.setRvcModel(RvcModelSlot.SYNTHESIZER, it) }
+    }
+    val rvcEmbedderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.setRvcModel(RvcModelSlot.CONTENT_ENCODER, it) }
+    }
+    val rvcRmvpePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.setRvcModel(RvcModelSlot.PITCH_EXTRACTOR, it) }
+    }
+    val rvcAudioPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { vm.setRvcInput(it) }
+    }
+    val rvcSavePicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("audio/wav")) { uri ->
+        uri?.let { vm.saveRvcOutput(it) }
+    }
 
     // Restore the saved monitor on/off choice so it isn't reset to "on" on every launch.
     LaunchedEffect(Unit) { vm.loadMonitoring(context) }
@@ -268,6 +287,98 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                     color = StudioColors.TextMuted,
                 )
                 ParamSlider("Intensity", vocalShine, vm::setVocalShine, 0f..1f)
+            }
+        }
+
+        // ── Neural voice conversion ────────────────────────────────────────────
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            color = StudioColors.Card,
+            border = BorderStroke(1.dp, StudioColors.AccentDim),
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "AI VOICE STUDIO · RVC",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = StudioColors.TextPrimary,
+                    letterSpacing = 1.2.sp,
+                )
+                Text(
+                    "Neural timbre conversion for recorded clips. Import a compatible RVC synthesizer, ContentVec/HuBERT and RMVPE ONNX model, plus a PCM16 WAV source. Not a live microphone effect.",
+                    fontSize = 10.sp,
+                    color = StudioColors.TextMuted,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(
+                        onClick = { rvcSynthPicker.launch(arrayOf("*/*")) },
+                        enabled = !rvcStudio.isConverting,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (rvcStudio.synthUri == null) "1 · Synth" else "1 · Synth ✓", fontSize = 10.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { rvcEmbedderPicker.launch(arrayOf("*/*")) },
+                        enabled = !rvcStudio.isConverting,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (rvcStudio.embedderUri == null) "2 · Content" else "2 · Content ✓", fontSize = 10.sp)
+                    }
+                }
+                OutlinedButton(
+                    onClick = { rvcRmvpePicker.launch(arrayOf("*/*")) },
+                    enabled = !rvcStudio.isConverting,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (rvcStudio.rmvpeUri == null) "3 · Select RMVPE pitch model" else "3 · RMVPE selected ✓", fontSize = 10.sp)
+                }
+                OutlinedButton(
+                    onClick = { rvcAudioPicker.launch(arrayOf("audio/wav", "audio/x-wav", "audio/wave")) },
+                    enabled = !rvcStudio.isConverting,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (rvcStudio.inputUri == null) "Select singing / speech WAV" else "Source WAV selected ✓", fontSize = 10.sp)
+                }
+                if (rvcStudio.isConverting) {
+                    LinearProgressIndicator(
+                        progress = rvcStudio.progress.coerceIn(0f, 1f),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "Neural conversion · ${(rvcStudio.progress * 100).toInt()}%",
+                        fontSize = 10.sp,
+                        color = StudioColors.Accent,
+                    )
+                }
+                rvcStudio.message?.let {
+                    Text(it, fontSize = 10.sp, color = StudioColors.TextMuted)
+                }
+                rvcStudio.error?.let {
+                    Text(it, fontSize = 10.sp, color = StudioColors.MeterAmber)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { vm.convertRvcClip() },
+                        enabled = !rvcStudio.isConverting && rvcStudio.modelsReady && rvcStudio.inputUri != null,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (rvcStudio.isConverting) "Converting…" else "Convert with AI", fontSize = 11.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { rvcSavePicker.launch("weirdo-ai-voice.wav") },
+                        enabled = !rvcStudio.isConverting && rvcStudio.outputClip != null,
+                    ) {
+                        Text("Save WAV", fontSize = 11.sp)
+                    }
+                }
+                Text(
+                    "Mobile limit: 30 seconds per clip. The conversion runs after recording, so processing time depends on your phone and model sizes.",
+                    fontSize = 9.sp,
+                    color = StudioColors.TextMuted,
+                )
             }
         }
 
