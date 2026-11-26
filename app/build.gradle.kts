@@ -125,6 +125,9 @@ dependencies {
     // Audio (Oboe via prefab)
     implementation(libs.oboe)
 
+    // On-device neural voice conversion (RVC ONNX models)
+    implementation(libs.onnxruntime.android)
+
     // Kotlin
     implementation(libs.coroutines.android)
     implementation(libs.serialization.json)
