@@ -375,7 +375,7 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                     }
                 }
                 Text(
-                    "Mobile limit: 30 seconds per clip. The conversion runs after recording, so processing time depends on your phone and model sizes.",
+                    "Mobile limit: 15 seconds per clip. The conversion runs after recording, so processing time depends on your phone and model sizes.",
                     fontSize = 9.sp,
                     color = StudioColors.TextMuted,
                 )
