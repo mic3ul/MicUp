@@ -376,15 +376,22 @@ class WhatsAppAudioUserService(
             null
         }
 
-        var result = build(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
-        captureSource = MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        // VOICE_PERFORMANCE is intended for real-time processed playback
+        // (e.g. karaoke) and minimizes capture/playback coupling. It is the
+        // preferred source for live transformation; fall back to VoIP/MIC
+        // when a device does not implement it correctly.
+        var result: AudioRecord? = null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            result = build(MediaRecorder.AudioSource.VOICE_PERFORMANCE)
+            if (result != null) captureSource = MediaRecorder.AudioSource.VOICE_PERFORMANCE
+        }
+        if (result == null) {
+            result = build(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+            if (result != null) captureSource = MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        }
         if (result == null) {
             result = build(MediaRecorder.AudioSource.MIC)
-            captureSource = MediaRecorder.AudioSource.MIC
-        }
-        if (result == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            result = build(MediaRecorder.AudioSource.VOICE_PERFORMANCE)
-            captureSource = MediaRecorder.AudioSource.VOICE_PERFORMANCE
+            if (result != null) captureSource = MediaRecorder.AudioSource.MIC
         }
         if (result == null) {
             status = "AudioRecord failed for VOICE_COMMUNICATION, MIC and VOICE_PERFORMANCE sources"
