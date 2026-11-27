@@ -31,6 +31,15 @@ class OboeEngine @Inject constructor() {
     fun isNativeLoaded() = libraryLoaded && engineHandle != 0L
 
     fun start(): Boolean = if (engineHandle != 0L) nativeStart(engineHandle) else false
+
+    /** Starts DSP without opening a second microphone capture stream. */
+    fun startExternal(): Boolean = if (engineHandle != 0L) nativeStartExternal(engineHandle) else false
+
+    /** Processes one 48 kHz mono PCM block in-place on a non-real-time worker. */
+    fun processExternalPcm(samples: FloatArray) {
+        if (engineHandle != 0L && samples.isNotEmpty()) nativeProcessExternal(engineHandle, samples)
+    }
+
     fun stop() { if (engineHandle != 0L) nativeStop(engineHandle) }
     fun isValid() = engineHandle != 0L
 
@@ -80,6 +89,8 @@ class OboeEngine @Inject constructor() {
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
     private external fun nativeStart(handle: Long): Boolean
+    private external fun nativeStartExternal(handle: Long): Boolean
+    private external fun nativeProcessExternal(handle: Long, pcm: FloatArray)
     private external fun nativeStop(handle: Long)
     private external fun nativeSetParam(handle: Long, effectId: Int, paramId: Int, value: Float)
     private external fun nativeGetLevels(handle: Long): FloatArray
