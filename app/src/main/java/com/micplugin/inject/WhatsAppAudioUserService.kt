@@ -305,7 +305,6 @@ class WhatsAppAudioUserService private constructor(
     private fun startInjectionThread() {
         injectionThread = Thread({
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
-            val comfortNoise = ShortArray(BLOCK_SAMPLES * 2)
             var noiseSeed = 0x13579b
             while (running.get() && !Thread.currentThread().isInterrupted) {
                 val mono = try {
@@ -333,17 +332,22 @@ class WhatsAppAudioUserService private constructor(
                 }
 
                 val track = injectionTrack ?: break
-                val written = runCatching {
-                    track.write(stereo, 0, stereo.size, AudioTrack.WRITE_BLOCKING)
-                }.getOrElse {
-                    status = "AudioTrack write threw: ${it.message}"
-                    Log.e(TAG, status, it)
-                    break
-                }
-                if (written < 0) {
-                    status = "AudioTrack.write failed: $written"
-                    Log.e(TAG, status)
-                    break
+                var offset = 0
+                while (offset < stereo.size && running.get()) {
+                    val written = try {
+                        track.write(stereo, offset, stereo.size - offset, AudioTrack.WRITE_BLOCKING)
+                    } catch (error: Throwable) {
+                        status = "AudioTrack write threw: ${error.message}"
+                        Log.e(TAG, status, error)
+                        -1
+                    }
+                    if (written <= 0) {
+                        status = "AudioTrack.write failed: $written"
+                        Log.e(TAG, status)
+                        running.set(false)
+                        break
+                    }
+                    offset += written
                 }
             }
         }, "weirdo-whatsapp-injection").apply {
