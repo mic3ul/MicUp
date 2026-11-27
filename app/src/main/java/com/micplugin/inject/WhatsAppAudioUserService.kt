@@ -63,6 +63,9 @@ class WhatsAppAudioUserService(
     @Volatile private var droppedOutputBlocks = 0L
     @Volatile private var captureBlocks = 0L
     @Volatile private var captureRmsDb = -120f
+    @Volatile private var targetRecordingActive = false
+    @Volatile private var shellInputSilenced = false
+    @Volatile private var targetRecordingSource = -1
     @Volatile private var targetUid = -1
 
     override fun start(targetUid: Int, sampleRate: Int): String {
@@ -120,6 +123,9 @@ class WhatsAppAudioUserService(
         droppedOutputBlocks = 0
         captureBlocks = 0
         captureRmsDb = -120f
+        targetRecordingActive = false
+        shellInputSilenced = false
+        targetRecordingSource = -1
         micQueue.clear()
         outputQueue.clear()
 
@@ -270,6 +276,51 @@ class WhatsAppAudioUserService(
         )
     }
 
+    /**
+     * Android can silence one of two concurrent AudioRecord clients. Read the
+     * active recording configurations so the app can distinguish a silent
+     * shell capture from an injection/AudioTrack failure.
+     */
+    private fun refreshRecordingDiagnostics(record: AudioRecord) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val configurations = runCatching {
+            audioManager?.activeRecordingConfigurations.orEmpty()
+        }.getOrDefault(emptyList())
+
+        val shellUid = Process.myUid()
+        var ownSilenced = false
+        var ownSeen = false
+        var targetSeen = false
+        var targetSource = -1
+
+        for (configuration in configurations) {
+            val type = configuration.javaClass
+            val uid = runCatching {
+                type.getMethod("getClientUid").invoke(configuration) as Int
+            }.getOrNull() ?: continue
+            val sessionId = runCatching {
+                type.getMethod("getClientAudioSessionId").invoke(configuration) as Int
+            }.getOrNull() ?: -1
+
+            if (uid == shellUid && sessionId == record.audioSessionId) {
+                ownSeen = true
+                ownSilenced = runCatching {
+                    type.getMethod("isClientSilenced").invoke(configuration) as Boolean
+                }.getOrDefault(false)
+            }
+            if (uid == targetUid) {
+                targetSeen = true
+                targetSource = runCatching {
+                    type.getMethod("getClientAudioSource").invoke(configuration) as Int
+                }.getOrDefault(-1)
+            }
+        }
+
+        shellInputSilenced = ownSeen && ownSilenced
+        targetRecordingActive = targetSeen
+        targetRecordingSource = targetSource
+    }
+
     private fun startCaptureThread(record: AudioRecord) {
         captureThread = Thread({
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
@@ -312,10 +363,13 @@ class WhatsAppAudioUserService(
                     }
 
                     val now = System.nanoTime()
-                    if (now - lastMeterNs >= 1_000_000_000L && squareCount > 0) {
-                        val rms = kotlin.math.sqrt(sumSquares / squareCount)
-                        captureRmsDb = if (rms <= 1e-6) -120f else (20.0 * kotlin.math.log10(rms)).toFloat()
-                        captureBlocks += squareCount / BLOCK_SAMPLES
+                    if (now - lastMeterNs >= 1_000_000_000L) {
+                        if (squareCount > 0) {
+                            val rms = kotlin.math.sqrt(sumSquares / squareCount)
+                            captureRmsDb = if (rms <= 1e-6) -120f else (20.0 * kotlin.math.log10(rms)).toFloat()
+                            captureBlocks += squareCount / BLOCK_SAMPLES
+                        }
+                        refreshRecordingDiagnostics(record)
                         lastMeterNs = now
                         sumSquares = 0.0
                         squareCount = 0
@@ -416,9 +470,10 @@ class WhatsAppAudioUserService(
     }
 
     override fun getStatus(): String =
-        "$status; micQueue=${micQueue.size}; outQueue=${outputQueue.size}; " +
-            "micRms=${"%.1f".format(java.util.Locale.US, captureRmsDb)}dB; " +
-            "blocks=$captureBlocks; dropIn=$droppedCaptureBlocks; dropOut=$droppedOutputBlocks"
+        "$status; targetRecording=$targetRecordingActive(source=$targetRecordingSource); " +
+            "shellMicSilenced=$shellInputSilenced; micRms=${"%.1f".format(java.util.Locale.US, captureRmsDb)}dB; " +
+            "micQueue=${micQueue.size}; outQueue=${outputQueue.size}; blocks=$captureBlocks; " +
+            "dropIn=$droppedCaptureBlocks; dropOut=$droppedOutputBlocks"
 
     override fun stop() {
         val token = Binder.clearCallingIdentity()
