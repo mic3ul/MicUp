@@ -224,6 +224,9 @@ class AudioProcessingService : Service() {
                 val status = when {
                     stats.lastError != null -> "Live RVC error: ${stats.lastError}"
                     !stats.ready -> "Live RVC warming up · capturing 1 s of context"
+                    stats.averageInferenceMs > averageBudget ->
+                        "RVC is slower than the ${averageBudget} ms audio step · avg ${stats.averageInferenceMs} ms · " +
+                            "${stats.windowsSkipped} windows skipped · this phone may stutter"
                     else -> "Live RVC · ${stats.inferenceMs} ms inference · avg ${stats.averageInferenceMs} ms · " +
                         "target ${averageBudget} ms · skipped ${stats.windowsSkipped}"
                 }
