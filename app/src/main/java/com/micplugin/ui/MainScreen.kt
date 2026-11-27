@@ -298,18 +298,20 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (shizukuState != com.micplugin.service.ShizukuState.READY && !whatsAppLiveActive) {
+                    if (shizukuState == com.micplugin.service.ShizukuState.NEED_GRANT && !whatsAppLiveActive) {
                         OutlinedButton(
                             onClick = vm::requestShizukuPermission,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text(
-                                if (shizukuState == com.micplugin.service.ShizukuState.UNAVAILABLE)
-                                    "Check Shizuku"
-                                else "Grant Shizuku permission",
-                                fontSize = 10.sp,
-                            )
+                            Text("Grant Shizuku permission", fontSize = 10.sp)
                         }
+                    } else if (shizukuState == com.micplugin.service.ShizukuState.UNAVAILABLE && !whatsAppLiveActive) {
+                        Text(
+                            "Start Shizuku from its app using Wireless debugging, then return here.",
+                            modifier = Modifier.weight(1f),
+                            fontSize = 10.sp,
+                            color = StudioColors.MeterAmber,
+                        )
                     } else if (!whatsAppLiveActive) {
                         Button(
                             onClick = { vm.startWhatsAppLive(context) },
