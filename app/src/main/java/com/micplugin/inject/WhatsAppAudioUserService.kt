@@ -37,14 +37,17 @@ class WhatsAppAudioUserService(
         private const val REQUIRED_PACKAGE = "com.whatsapp"
         private const val RATE = 48_000
         private const val BLOCK_SAMPLES = 960 // 20 ms at 48 kHz
-        private const val MAX_QUEUE_BLOCKS = 10
+        private const val MAX_CAPTURE_QUEUE_BLOCKS = 10
+        // The RVC worker delivers 15 (300 ms) or 25 (500 ms) 20 ms blocks
+        // in a burst; leave room for one full chunk without an artificial drop.
+        private const val MAX_OUTPUT_QUEUE_BLOCKS = 32
         private const val PERMISSION_MODIFY_AUDIO_ROUTING =
             "android.permission.MODIFY_AUDIO_ROUTING"
     }
 
     private val running = AtomicBoolean(false)
-    private val micQueue = ArrayBlockingQueue<ByteArray>(MAX_QUEUE_BLOCKS)
-    private val outputQueue = ArrayBlockingQueue<ShortArray>(MAX_QUEUE_BLOCKS)
+    private val micQueue = ArrayBlockingQueue<ByteArray>(MAX_CAPTURE_QUEUE_BLOCKS)
+    private val outputQueue = ArrayBlockingQueue<ShortArray>(MAX_OUTPUT_QUEUE_BLOCKS)
 
     @Volatile private var context: Context? = appContext?.applicationContext
     @Volatile private var audioManager: AudioManager? = null
