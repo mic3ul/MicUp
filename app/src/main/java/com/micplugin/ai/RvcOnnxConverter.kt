@@ -44,6 +44,8 @@ class RvcOnnxConverter private constructor(
     private val sessionOptions: OrtSession.SessionOptions,
 ) : Closeable {
 
+    @Volatile private var closed = false
+
     data class ModelUris(val synth: Uri, val embedder: Uri, val rmvpe: Uri)
 
     data class Metadata(
@@ -213,6 +215,7 @@ class RvcOnnxConverter private constructor(
      * pitchShiftSemitones is deliberately clamped to a small range; large
      * transpositions can damage singing formants and consonant timing.
      */
+    @Synchronized
     fun convert(
         input: FloatArray,
         inputSampleRate: Int,
@@ -220,6 +223,7 @@ class RvcOnnxConverter private constructor(
         speakerId: Long = 0L,
         progress: (Float) -> Unit = {},
     ): ConvertedAudio {
+        check(!closed) { "RVC model is closed." }
         require(input.isNotEmpty()) { "The selected audio is empty." }
         require(input.size <= inputSampleRate * MAX_INPUT_SECONDS) {
             "This mobile build accepts clips up to $MAX_INPUT_SECONDS seconds."
@@ -499,7 +503,12 @@ class RvcOnnxConverter private constructor(
         }
     }
 
+    @Synchronized
     override fun close() {
+        if (closed) return
+        closed = true
+        // If a worker is currently inside convert(), the synchronized monitor
+        // makes close wait until native ORT inference has returned.
         runCatching { rmvpe?.close() }
         runCatching { embedder.close() }
         runCatching { synth.close() }
