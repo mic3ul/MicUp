@@ -10,6 +10,8 @@ import androidx.core.app.NotificationCompat
 import com.micplugin.MainActivity
 import com.micplugin.R
 import com.micplugin.audio.AudioEngine
+import com.micplugin.inject.WhatsAppAudioInjector
+import com.micplugin.inject.WhatsAppLiveState
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 import javax.inject.Inject
@@ -21,10 +23,20 @@ class AudioProcessingService : Service() {
         const val CHANNEL_ID   = "weirdo_audio"
         const val NOTIF_ID     = 1001
         const val ACTION_STOP  = "com.micplugin.STOP"
+        const val ACTION_WHATSAPP_LIVE_START = "com.micplugin.WHATSAPP_LIVE_START"
 
         fun start(context: Context) {
             val intent = Intent(context, AudioProcessingService::class.java)
             context.startForegroundService(intent)
+        }
+        fun startWhatsAppLive(context: Context) {
+            val intent = Intent(context, AudioProcessingService::class.java).apply {
+                action = ACTION_WHATSAPP_LIVE_START
+            }
+            context.startForegroundService(intent)
+        }
+        fun stopWhatsAppLive(context: Context) {
+            context.stopService(Intent(context, AudioProcessingService::class.java))
         }
         fun stop(context: Context) {
             context.stopService(Intent(context, AudioProcessingService::class.java))
@@ -32,6 +44,7 @@ class AudioProcessingService : Service() {
     }
 
     @Inject lateinit var audioEngine: AudioEngine
+    @Inject lateinit var whatsAppAudioInjector: WhatsAppAudioInjector
 
     private var wakeLock: PowerManager.WakeLock? = null
     private var noiseSuppressor: NoiseSuppressor? = null
@@ -45,7 +58,7 @@ class AudioProcessingService : Service() {
                     val status = audioEngine.status.value
                     val pluginCount = audioEngine.pluginChain.slots.value.size
                     updateNotification(
-                        "Active · $pluginCount plugins",
+                        if (whatsAppLiveActive) "WhatsApp live mic · UID restricted" else "Active · $pluginCount plugins",
                         pluginCount,
                         status.latencyMs,
                     )
@@ -177,6 +190,133 @@ class AudioProcessingService : Service() {
     @Volatile private var audioPumpRunning = false
     private var audioPumpThread: Thread? = null
 
+    @Volatile private var whatsAppLiveActive = false
+    @Volatile private var whatsAppPumpRunning = false
+    private var whatsAppPumpThread: Thread? = null
+
+    private fun startWhatsAppPcmPump() {
+        if (whatsAppPumpThread?.isAlive == true) return
+        whatsAppPumpRunning = true
+        whatsAppPumpThread = Thread({
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO) }
+            var processedBlocks = 0L
+            var lastNotice = System.nanoTime()
+            while (whatsAppPumpRunning && !Thread.currentThread().isInterrupted) {
+                val input = whatsAppAudioInjector.pullInputPcm(25)
+                if (input.size < 2) {
+                    try { Thread.sleep(1) } catch (_: InterruptedException) { break }
+                    continue
+                }
+
+                val sampleCount = input.size / 2
+                val samples = FloatArray(sampleCount)
+                for (i in 0 until sampleCount) {
+                    val value = (input[i * 2].toInt() and 0xff) or (input[i * 2 + 1].toInt() shl 8)
+                    samples[i] = value.toShort().toInt() / 32768f
+                }
+
+                // Same native DSP chain as the ordinary microphone path, but fed
+                // from the shell AudioRecord so Oboe never opens a competing mic.
+                audioEngine.processExternalPcm(samples)
+
+                val output = ByteArray(sampleCount * 2)
+                for (i in 0 until sampleCount) {
+                    val value = (samples[i].coerceIn(-1f, 1f) * 32767f).toInt()
+                    output[i * 2] = value.toByte()
+                    output[i * 2 + 1] = (value shr 8).toByte()
+                }
+                whatsAppAudioInjector.pushProcessedPcm(output)
+                processedBlocks++
+
+                val now = System.nanoTime()
+                if (now - lastNotice >= 5_000_000_000L) {
+                    lastNotice = now
+                    val remoteStatus = whatsAppAudioInjector.remoteStatus()
+                    updateNotification(
+                        "WhatsApp live mic · ${processedBlocks * 20 / 1000}s processed",
+                        0,
+                        20f,
+                    )
+                    android.util.Log.i("weirdo.WhatsAppLive", remoteStatus)
+                }
+            }
+        }, "weirdo-WhatsApp-PCM-Pump").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun stopWhatsAppPcmPump() {
+        whatsAppPumpRunning = false
+        val thread = whatsAppPumpThread
+        thread?.interrupt()
+        if (thread != null && thread !== Thread.currentThread()) {
+            runCatching { thread.join(350) }
+        }
+        whatsAppPumpThread = null
+    }
+
+    private suspend fun startWhatsAppLiveMode() {
+        if (whatsAppLiveActive) return
+        stopProcessedAudioPump()
+        try { noiseSuppressor?.release() } catch (_: Exception) {}
+        noiseSuppressor = null
+        audioEngine.stop()
+        ProcessedAudioBridge.setEngineState(active = false)
+        SoftwareLoopback.stop()
+
+        updateNotification("Connecting to Shizuku…", 0, 0f)
+        val routeResult = whatsAppAudioInjector.startWhatsApp()
+        if (!routeResult.startsWith("running:")) {
+            WhatsAppLiveState.set(routeResult)
+            updateNotification(routeResult, 0, 0f)
+            android.util.Log.e("weirdo.WhatsAppLive", routeResult)
+            return
+        }
+
+        if (!audioEngine.startExternal()) {
+            whatsAppAudioInjector.stopWhatsApp()
+            val error = "Native PCM processor could not start"
+            WhatsAppLiveState.set(error)
+            updateNotification(error, 0, 0f)
+            return
+        }
+
+        whatsAppLiveActive = true
+        WhatsAppLiveState.set("WhatsApp live microphone active · DSP path")
+        startWhatsAppPcmPump()
+        updateNotification("WhatsApp live mic · UID restricted", 0, 20f)
+        android.util.Log.i("weirdo.WhatsAppLive", "Live route ready: $routeResult")
+    }
+
+    private suspend fun stopWhatsAppLiveMode() {
+        stopWhatsAppPcmPump()
+        whatsAppLiveActive = false
+        runCatching { whatsAppAudioInjector.stopWhatsApp() }
+        audioEngine.stop()
+        WhatsAppLiveState.set("WhatsApp live mic is off; physical microphone restored")
+    }
+
+    private suspend fun startStandardAudioMode() {
+        if (whatsAppLiveActive) stopWhatsAppLiveMode()
+        val started = audioEngine.start()
+        if (started) attachPlatformNoiseSuppressor()
+        else {
+            try { noiseSuppressor?.release() } catch (_: Exception) {}
+            noiseSuppressor = null
+        }
+        ProcessedAudioBridge.setEngineState(
+            active = started,
+            sampleRate = audioEngine.status.value.sampleRate,
+        )
+        if (!started) {
+            android.util.Log.e("weirdo.Service", "Audio engine failed to start")
+        } else {
+            if (!SoftwareLoopback.isRunning) SoftwareLoopback.start(this)
+            startProcessedAudioPump()
+        }
+    }
+
     private fun startProcessedAudioPump() {
         if (audioPumpThread?.isAlive == true) return
         audioPumpRunning = true
@@ -226,31 +366,25 @@ class AudioProcessingService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        val started = audioEngine.start()
-        if (started) attachPlatformNoiseSuppressor()
-        else {
-            try { noiseSuppressor?.release() } catch (_: Exception) {}
-            noiseSuppressor = null
-        }
-        ProcessedAudioBridge.setEngineState(
-            active = started,
-            sampleRate = audioEngine.status.value.sampleRate,
-        )
-        if (!started) {
-            android.util.Log.e("weirdo.Service", "Audio engine failed to start")
-        }
         if (!updatesStarted) {
             startStatusUpdates()
             updatesStarted = true
         }
-        if (!SoftwareLoopback.isRunning) SoftwareLoopback.start(this)
-        if (started) startProcessedAudioPump()
+        if (intent?.action == ACTION_WHATSAPP_LIVE_START) {
+            scope.launch(Dispatchers.IO) { startWhatsAppLiveMode() }
+            return START_STICKY
+        }
+
+        scope.launch(Dispatchers.IO) { startStandardAudioMode() }
         return START_STICKY
     }
 
     override fun onDestroy() {
         updatesStarted = false
         stopProcessedAudioPump()
+        stopWhatsAppPcmPump()
+        whatsAppLiveActive = false
+        whatsAppAudioInjector.unbind()
         scope.cancel()
         ProcessedAudioBridge.setEngineState(active = false)
         try { noiseSuppressor?.release() } catch (e: Exception) {
