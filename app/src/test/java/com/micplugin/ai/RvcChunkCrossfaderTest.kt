@@ -14,7 +14,9 @@ class RvcChunkCrossfaderTest {
         val output = crossfader.emit(first)
 
         assertEquals(10, output.size)
-        assertTrue(output.all { it == 1f })
+        assertEquals(0f, output.first(), 0.0001f)
+        assertEquals(1f, output.last(), 0.0001f)
+        assertTrue(output.drop(1).all { it == 1f })
     }
 
     @Test
