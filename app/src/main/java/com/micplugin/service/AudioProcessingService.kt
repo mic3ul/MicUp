@@ -277,10 +277,10 @@ class AudioProcessingService : Service() {
                     val remoteStatus = whatsAppAudioInjector.remoteStatus()
                     WhatsAppLiveState.setActive(
                         true,
-                        "Live WhatsApp route · ${processedBlocks * 20 / 1000}s processed\n$remoteStatus"
+                        "Live WhatsApp mic · ${processedBlocks * 20 / 1000}s captured\n$remoteStatus"
                     )
                     updateNotification(
-                        "WhatsApp live mic · ${processedBlocks * 20 / 1000}s processed",
+                        "WhatsApp live mic · ${processedBlocks * 20 / 1000}s captured",
                         0,
                         20f,
                     )
