@@ -194,6 +194,7 @@ class AudioProcessingService : Service() {
     private var audioPumpThread: Thread? = null
 
     @Volatile private var whatsAppLiveActive = false
+    @Volatile private var whatsAppLiveStarting = false
     @Volatile private var whatsAppPumpRunning = false
     private var whatsAppPumpThread: Thread? = null
     @Volatile private var liveRvcProcessor: RvcLiveStreamProcessor? = null
@@ -307,6 +308,16 @@ class AudioProcessingService : Service() {
     }
 
     private suspend fun startWhatsAppLiveMode() {
+        if (whatsAppLiveActive || whatsAppLiveStarting) return
+        whatsAppLiveStarting = true
+        try {
+            startWhatsAppLiveInternal()
+        } finally {
+            whatsAppLiveStarting = false
+        }
+    }
+
+    private suspend fun startWhatsAppLiveInternal() {
         if (whatsAppLiveActive) return
         stopProcessedAudioPump()
         try { noiseSuppressor?.release() } catch (_: Exception) {}
@@ -350,6 +361,8 @@ class AudioProcessingService : Service() {
             return
         }
 
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
+        WhatsAppLiveState.setActive(false, "RVC models loaded · connecting to WhatsApp microphone route…")
         updateNotification("Connecting to Shizuku…", 0, 0f)
         val routeResult = whatsAppAudioInjector.startWhatsApp()
         if (!routeResult.startsWith("running:")) {
