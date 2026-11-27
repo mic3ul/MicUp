@@ -96,47 +96,54 @@ jobs:
               print(f"PASS {name}: {path.stat().st_size / 1024 / 1024:.1f} MiB")
           PY
 
-      - name: Add model provenance, licenses and checksums
+      - name: Assemble compact 500 ms mobile bundle
         run: |
-          cp "$RUNNER_TEMP/voice-changer/LICENSE" artifacts/rvc-live/VOICE_CHANGER_MIT_LICENSE.txt
+          mkdir -p artifacts/rvc-live/bundle
+          cp artifacts/rvc-live/models/shadowww_t02_stream_500ms.onnx artifacts/rvc-live/bundle/
+          cp artifacts/rvc-live/input/contentvec_768l12_q8.onnx artifacts/rvc-live/bundle/
+          cp artifacts/rvc-live/input/rmvpe_q8.onnx artifacts/rvc-live/bundle/
+          cp artifacts/rvc-live/models/ATTRIBUTION.txt artifacts/rvc-live/bundle/ATTRIBUTION.txt
+          cp "$RUNNER_TEMP/voice-changer/LICENSE" artifacts/rvc-live/bundle/VOICE_CHANGER_MIT_LICENSE.txt
           curl -fL https://raw.githubusercontent.com/TigreGotico/voiceclonnx/dev/LICENSE \
-            -o artifacts/rvc-live/BASE_MODELS_MIT_LICENSE.txt
-          cp artifacts/rvc-live/models/ATTRIBUTION.txt artifacts/rvc-live/ATTRIBUTION.txt
-          cat > artifacts/rvc-live/README.txt <<'EOF'
-          WEIRDO LIVE RVC — SHADOWWW T02 RAW
+            -o artifacts/rvc-live/bundle/BASE_MODELS_MIT_LICENSE.txt
+          cat > artifacts/rvc-live/bundle/README.txt <<'EOF'
+          WEIRDO LIVE RVC — SHADOWWW T02 RAW — 500 ms MOBILE PROFILE
+
+          Models:
+          - shadowww_t02_stream_500ms.onnx (RVC-v2 synthesizer)
+          - contentvec_768l12_q8.onnx (INT8 ContentVec-768)
+          - rmvpe_q8.onnx (INT8 RMVPE)
+
+          Runtime contract:
+          - 48 kHz mono input, converted through 16 kHz ContentVec/RMVPE features
+          - 1 second feature context
+          - 550 ms generated tail, 50 ms overlap, 500 ms new audio per inference
+          - 500 ms is the synthesis step size, NOT a measured end-to-end WhatsApp latency
+          - Device performance must be verified on the HONOR X5b before treating this as real-time
 
           Voice model: Shadowww
           Source: https://huggingface.co/ShadowSH2306/shadowww-voices
           License: CC BY-NC 4.0
           Required credit: Voice model: Shadowww
+          Non-commercial use only without separate permission. Do not impersonate the
+          original artist; label AI-generated vocals as AI.
 
-          Non-commercial use only unless separate permission is obtained from Shadowww.
-          Do not impersonate Shadowww. Label AI-generated vocals as AI.
-          Upstream pretrained base credit: KLM 4.1 48k by SeungHyun Han
-          (Seoul Streaming Station).
+          Upstream pretrained voice base credit:
+          KLM 4.1 48k by SeungHyun Han (Seoul Streaming Station).
 
-          Two fixed-window streaming synthesizers:
-          - 300 ms stride: 1 second context, 350 ms output tail, 50 ms crossfade.
-          - 500 ms stride: 1 second context, 550 ms output tail, 50 ms crossfade.
-
-          Shared MIT-licensed base models:
-          - ContentVec-768 INT8
-          - RMVPE INT8
-
-          The Shadowww voice weights are non-commercial and are not licensed for
-          commercial redistribution. Keep ATTRIBUTION.txt and both license files
-          with the model bundle. Performance is device-dependent and has not yet
-          been measured on the HONOR X5b.
+          ContentVec and RMVPE base models are from TigreGotico/voiceclonnx-rvc,
+          licensed MIT. The exporter architecture source is w-okada/voice-changer,
+          licensed MIT. License texts are included in this bundle.
           EOF
-          find artifacts/rvc-live -type f -not -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > artifacts/rvc-live/SHA256SUMS
-          cd artifacts && zip -r -9 ../weirdo-live-rvc-shadowww-t02.zip rvc-live
+          cd artifacts/rvc-live/bundle
+          sha256sum *.onnx > SHA256SUMS
+          cd ../../..
+          zip -r -9 weirdo-live-rvc-shadowww-t02-500ms.zip artifacts/rvc-live/bundle
 
-      - name: Upload WEIRDO Live RVC bundle
+      - name: Upload compact Live RVC bundle
         uses: actions/upload-artifact@v4
         with:
-          name: weirdo-live-rvc-shadowww-t02
-          path: |
-            weirdo-live-rvc-shadowww-t02.zip
-            artifacts/rvc-live/**
+          name: weirdo-live-rvc-shadowww-t02-500ms
+          path: weirdo-live-rvc-shadowww-t02-500ms.zip
           if-no-files-found: error
           retention-days: 30
