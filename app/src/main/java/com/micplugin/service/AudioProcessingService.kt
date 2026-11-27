@@ -10,6 +10,9 @@ import androidx.core.app.NotificationCompat
 import com.micplugin.MainActivity
 import com.micplugin.R
 import com.micplugin.audio.AudioEngine
+import com.micplugin.ai.RvcLiveStreamProcessor
+import com.micplugin.ai.RvcOnnxConverter
+import android.net.Uri
 import com.micplugin.inject.WhatsAppAudioInjector
 import com.micplugin.inject.WhatsAppLiveState
 import dagger.hilt.android.AndroidEntryPoint
@@ -193,6 +196,41 @@ class AudioProcessingService : Service() {
     @Volatile private var whatsAppLiveActive = false
     @Volatile private var whatsAppPumpRunning = false
     private var whatsAppPumpThread: Thread? = null
+    @Volatile private var liveRvcProcessor: RvcLiveStreamProcessor? = null
+    @Volatile private var liveRvcConverter: RvcOnnxConverter? = null
+
+    private fun createLiveRvcProcessor(converter: RvcOnnxConverter): RvcLiveStreamProcessor {
+        return RvcLiveStreamProcessor(
+            converter = converter,
+            onOutput = { chunk ->
+                // A 300/500 ms neural chunk is emitted in one worker callback.
+                // The native DSP and the Shizuku AIDL bridge consume 20 ms blocks.
+                var offset = 0
+                while (offset + 960 <= chunk.size) {
+                    val frame = chunk.copyOfRange(offset, offset + 960)
+                    audioEngine.processExternalPcm(frame)
+                    val bytes = ByteArray(frame.size * 2)
+                    for (i in frame.indices) {
+                        val value = (frame[i].coerceIn(-1f, 1f) * 32767f).toInt()
+                        bytes[i * 2] = value.toByte()
+                        bytes[i * 2 + 1] = (value shr 8).toByte()
+                    }
+                    whatsAppAudioInjector.pushProcessedPcm(bytes)
+                    offset += 960
+                }
+            },
+            onStatus = { stats ->
+                val averageBudget = if (converter.streamingStepFrames == 30) 300L else 500L
+                val status = when {
+                    stats.lastError != null -> "Live RVC error: ${stats.lastError}"
+                    !stats.ready -> "Live RVC warming up · capturing 1 s of context"
+                    else -> "Live RVC · ${stats.inferenceMs} ms inference · avg ${stats.averageInferenceMs} ms · " +
+                        "target ${averageBudget} ms · skipped ${stats.windowsSkipped}"
+                }
+                WhatsAppLiveState.setActive(true, status)
+            },
+        )
+    }
 
     private fun startWhatsAppPcmPump() {
         if (whatsAppPumpThread?.isAlive == true) return
@@ -215,17 +253,22 @@ class AudioProcessingService : Service() {
                     samples[i] = value.toShort().toInt() / 32768f
                 }
 
-                // Same native DSP chain as the ordinary microphone path, but fed
-                // from the shell AudioRecord so Oboe never opens a competing mic.
-                audioEngine.processExternalPcm(samples)
-
-                val output = ByteArray(sampleCount * 2)
-                for (i in 0 until sampleCount) {
-                    val value = (samples[i].coerceIn(-1f, 1f) * 32767f).toInt()
-                    output[i * 2] = value.toByte()
-                    output[i * 2 + 1] = (value shr 8).toByte()
+                val processor = liveRvcProcessor
+                if (processor != null) {
+                    // RVC inference runs on its own worker. This capture pump
+                    // never waits for ONNX and therefore does not block AudioRecord.
+                    processor.pushInput(samples)
+                } else {
+                    // Diagnostic fallback only; normal live mode requires RVC.
+                    audioEngine.processExternalPcm(samples)
+                    val output = ByteArray(sampleCount * 2)
+                    for (i in 0 until sampleCount) {
+                        val value = (samples[i].coerceIn(-1f, 1f) * 32767f).toInt()
+                        output[i * 2] = value.toByte()
+                        output[i * 2 + 1] = (value shr 8).toByte()
+                    }
+                    whatsAppAudioInjector.pushProcessedPcm(output)
                 }
-                whatsAppAudioInjector.pushProcessedPcm(output)
                 processedBlocks++
 
                 val now = System.nanoTime()
@@ -269,9 +312,45 @@ class AudioProcessingService : Service() {
         ProcessedAudioBridge.setEngineState(active = false)
         SoftwareLoopback.stop()
 
+        // Load the selected RVC stream synthesizer and shared base models before
+        // opening the WhatsApp route, so a model error cannot leave capture active.
+        val prefs = getSharedPreferences("weirdo_ai_voice", MODE_PRIVATE)
+        val synthUri = prefs.getString("synth_uri", null)?.let(Uri::parse)
+        val embedderUri = prefs.getString("embedder_uri", null)?.let(Uri::parse)
+        val rmvpeUri = prefs.getString("rmvpe_uri", null)?.let(Uri::parse)
+        if (synthUri == null || embedderUri == null || rmvpeUri == null) {
+            val error = "Select the T02 300/500 ms streaming Synth, ContentVec INT8 and RMVPE INT8 models in AI Voice Studio first."
+            WhatsAppLiveState.setActive(false, error)
+            updateNotification("Live RVC models not selected", 0, 0f)
+            return
+        }
+
+        updateNotification("Loading live RVC models…", 0, 0f)
+        val converter = try {
+            RvcOnnxConverter.load(
+                applicationContext,
+                RvcOnnxConverter.ModelUris(synthUri, embedderUri, rmvpeUri)
+            )
+        } catch (error: Throwable) {
+            val message = "RVC model load failed: ${error.message ?: error.javaClass.simpleName}"
+            WhatsAppLiveState.setActive(false, message)
+            updateNotification("Live RVC model error", 0, 0f)
+            android.util.Log.e("weirdo.WhatsAppLive", message, error)
+            return
+        }
+
+        if (!converter.isStreamingModel) {
+            converter.close()
+            val error = "The selected synthesizer is clip-only. Choose the Shadowww T02 300 ms or 500 ms streaming ONNX model."
+            WhatsAppLiveState.setActive(false, error)
+            updateNotification("Streaming RVC model required", 0, 0f)
+            return
+        }
+
         updateNotification("Connecting to Shizuku…", 0, 0f)
         val routeResult = whatsAppAudioInjector.startWhatsApp()
         if (!routeResult.startsWith("running:")) {
+            converter.close()
             WhatsAppLiveState.setActive(false, routeResult)
             updateNotification(routeResult, 0, 0f)
             android.util.Log.e("weirdo.WhatsAppLive", routeResult)
@@ -280,22 +359,45 @@ class AudioProcessingService : Service() {
 
         if (!audioEngine.startExternal()) {
             whatsAppAudioInjector.stopWhatsApp()
+            converter.close()
             val error = "Native PCM processor could not start"
             WhatsAppLiveState.setActive(false, error)
             updateNotification(error, 0, 0f)
             return
         }
 
+        val processor = try {
+            createLiveRvcProcessor(converter).also { it.start() }
+        } catch (error: Throwable) {
+            whatsAppAudioInjector.stopWhatsApp()
+            audioEngine.stop()
+            converter.close()
+            val message = "Live RVC stream setup failed: ${error.message ?: error.javaClass.simpleName}"
+            WhatsAppLiveState.setActive(false, message)
+            updateNotification("Live RVC setup failed", 0, 0f)
+            android.util.Log.e("weirdo.WhatsAppLive", message, error)
+            return
+        }
+
+        liveRvcConverter = converter
+        liveRvcProcessor = processor
         whatsAppLiveActive = true
-        WhatsAppLiveState.setActive(true, "WhatsApp live microphone active · DSP processing")
+        WhatsAppLiveState.setActive(
+            true,
+            "Live RVC capturing · wait 1 second for the first converted window, then record a WhatsApp voice note."
+        )
         startWhatsAppPcmPump()
-        updateNotification("WhatsApp live mic · UID restricted", 0, 20f)
-        android.util.Log.i("weirdo.WhatsAppLive", "Live route ready: $routeResult")
+        updateNotification("WhatsApp live RVC · UID restricted", 0, 20f)
+        android.util.Log.i("weirdo.WhatsAppLive", "Live RVC route ready: $routeResult")
     }
 
     private suspend fun stopWhatsAppLiveMode() {
         stopWhatsAppPcmPump()
         whatsAppLiveActive = false
+        runCatching { liveRvcProcessor?.close() }
+        liveRvcProcessor = null
+        runCatching { liveRvcConverter?.close() }
+        liveRvcConverter = null
         runCatching { whatsAppAudioInjector.stopWhatsApp() }
         audioEngine.stop()
         WhatsAppLiveState.setActive(false, "WhatsApp live mic is off; physical microphone restored")
@@ -389,6 +491,10 @@ class AudioProcessingService : Service() {
         stopWhatsAppPcmPump()
         whatsAppLiveActive = false
         whatsAppAudioInjector.unbind()
+        runCatching { liveRvcProcessor?.close() }
+        liveRvcProcessor = null
+        runCatching { liveRvcConverter?.close() }
+        liveRvcConverter = null
         WhatsAppLiveState.setActive(false, "WhatsApp live mic is off; physical microphone restored")
         scope.cancel()
         ProcessedAudioBridge.setEngineState(active = false)
