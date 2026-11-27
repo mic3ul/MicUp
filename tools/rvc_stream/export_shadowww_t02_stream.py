@@ -34,11 +34,23 @@ class TailStreamingSynth(torch.nn.Module):
         m_p, logs_p, x_mask = net.enc_p(phone, pitch, phone_lengths)
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
         z = net.flow(z_p, x_mask, g=g, reverse=True)
-        tail_start = z.shape[2] - self.output_frames
-        z_tail = (z * x_mask)[:, :, tail_start:]
-        f0_tail = nsff0[:, -self.output_frames:]
-        audio = net.dec(z_tail, f0_tail, g=g)
-        return torch.clip(audio[0, 0], -1.0, 1.0)
+        # GeneratorNSF.infer_realtime keeps the convolutional receptive field
+        # from the preceding context frames and emits only the requested tail.
+        # Cropping z before the decoder would discard that receptive field and
+        # create an audible boundary at every 300/500 ms update.
+        convert_length = self.output_frames * (SAMPLE_RATE // 100)
+        audio = net.dec.infer_realtime(
+            z * x_mask,
+            nsff0,
+            g=g,
+            convert_length=convert_length,
+        )
+        audio = audio[0, 0]
+        if audio.numel() != convert_length:
+            raise RuntimeError(
+                f"Streaming generator returned {audio.numel()} samples; expected {convert_length}"
+            )
+        return torch.clip(audio, -1.0, 1.0)
 
 
 def find_checkpoint(extract_dir: Path) -> Path:
@@ -135,7 +147,7 @@ def main() -> None:
                 f"Unexpected stream output size: expected {expected_samples}, got {example.numel()}"
             )
 
-        filename = f"shadowww_t02_stream_{output_frames - OVERLAP_FRAMES}00ms.onnx"
+        filename = f"shadowww_t02_stream_{(output_frames - OVERLAP_FRAMES) * 10}ms.onnx"
         output_path = args.output_dir / filename
         torch.onnx.export(
             model,
