@@ -139,7 +139,7 @@ class RvcLiveStreamProcessor(
     private fun queueSnapshot(window: FloatArray) {
         var startWorker = false
         synchronized(lock) {
-            if (pendingWindow != null || workerActive) skippedWindows.incrementAndGet()
+            if (pendingWindow != null) skippedWindows.incrementAndGet()
             pendingWindow = window
             if (!workerActive) {
                 workerActive = true
