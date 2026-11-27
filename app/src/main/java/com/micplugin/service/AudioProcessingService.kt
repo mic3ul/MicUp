@@ -272,7 +272,7 @@ class AudioProcessingService : Service() {
         updateNotification("Connecting to Shizuku…", 0, 0f)
         val routeResult = whatsAppAudioInjector.startWhatsApp()
         if (!routeResult.startsWith("running:")) {
-            WhatsAppLiveState.set(routeResult)
+            WhatsAppLiveState.setActive(false, routeResult)
             updateNotification(routeResult, 0, 0f)
             android.util.Log.e("weirdo.WhatsAppLive", routeResult)
             return
@@ -281,7 +281,7 @@ class AudioProcessingService : Service() {
         if (!audioEngine.startExternal()) {
             whatsAppAudioInjector.stopWhatsApp()
             val error = "Native PCM processor could not start"
-            WhatsAppLiveState.set(error)
+            WhatsAppLiveState.setActive(false, error)
             updateNotification(error, 0, 0f)
             return
         }
@@ -389,6 +389,7 @@ class AudioProcessingService : Service() {
         stopWhatsAppPcmPump()
         whatsAppLiveActive = false
         whatsAppAudioInjector.unbind()
+        WhatsAppLiveState.setActive(false, "WhatsApp live mic is off; physical microphone restored")
         scope.cancel()
         ProcessedAudioBridge.setEngineState(active = false)
         try { noiseSuppressor?.release() } catch (e: Exception) {
