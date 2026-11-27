@@ -1,0 +1,452 @@
+package com.micplugin.inject
+
+import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.AudioTrack
+import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
+import android.media.AudioManager
+import android.os.Binder
+import android.os.Build
+import android.os.HandlerThread
+import android.os.Process
+import android.util.Log
+import androidx.annotation.Keep
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.max
+
+/**
+ * Shizuku UserService running as shell UID.
+ *
+ * The AudioPolicy injector is deliberately restricted to the UID that owns
+ * com.whatsapp. It captures the physical microphone in this shell process and
+ * injects processed PCM only into that application's recording mix.
+ *
+ * This is not an acoustic speaker/microphone loop and never targets all apps.
+ */
+class WhatsAppAudioUserService private constructor(
+    private val appContext: Context?
+) : IWhatsAppMicInjector.Stub() {
+
+    @Keep
+    constructor() : this(null)
+
+    @Keep
+    constructor(context: Context) : this(context.applicationContext)
+
+    companion object {
+        private const val TAG = "WeirdoWhatsAppInjector"
+        private const val REQUIRED_PACKAGE = "com.whatsapp"
+        private const val RATE = 48_000
+        private const val BLOCK_SAMPLES = 960 // 20 ms at 48 kHz
+        private const val MAX_QUEUE_BLOCKS = 10
+        private const val PERMISSION_MODIFY_AUDIO_ROUTING =
+            "android.permission.MODIFY_AUDIO_ROUTING"
+    }
+
+    private val running = AtomicBoolean(false)
+    private val micQueue = ArrayBlockingQueue<ByteArray>(MAX_QUEUE_BLOCKS)
+    private val outputQueue = ArrayBlockingQueue<ShortArray>(MAX_QUEUE_BLOCKS)
+
+    @Volatile private var context: Context? = appContext
+    @Volatile private var audioManager: AudioManager? = null
+    @Volatile private var policy: Any? = null
+    @Volatile private var mix: Any? = null
+    @Volatile private var injectionTrack: AudioTrack? = null
+    @Volatile private var microphone: AudioRecord? = null
+    @Volatile private var aec: AcousticEchoCanceler? = null
+    @Volatile private var noiseSuppressor: NoiseSuppressor? = null
+    @Volatile private var captureThread: Thread? = null
+    @Volatile private var injectionThread: Thread? = null
+    @Volatile private var policyHandlerThread: HandlerThread? = null
+    @Volatile private var status = "idle"
+    @Volatile private var captureSource = MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    @Volatile private var droppedCaptureBlocks = 0L
+    @Volatile private var droppedOutputBlocks = 0L
+    @Volatile private var targetUid = -1
+
+    override fun start(targetUid: Int, sampleRate: Int): String {
+        val token = Binder.clearCallingIdentity()
+        return try {
+            startInternal(targetUid, sampleRate)
+        } catch (error: Throwable) {
+            Log.e(TAG, "start failed", error)
+            stopInternal()
+            "ERROR: ${error.javaClass.simpleName}: ${error.message ?: "unknown"}"
+        } finally {
+            Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    private fun startInternal(uid: Int, requestedRate: Int): String {
+        if (running.get()) return "Already running for uid=$targetUid"
+        val ctx = context ?: return "ERROR: Shizuku did not supply a UserService Context"
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return "ERROR: AudioPolicy microphone injection requires Android 10 or newer"
+        }
+        if (requestedRate != RATE) return "ERROR: only 48000 Hz is supported"
+        if (uid < 10_000) return "ERROR: invalid target UID"
+
+        val packages = ctx.packageManager.getPackagesForUid(uid).orEmpty()
+        if (REQUIRED_PACKAGE !in packages) {
+            return "ERROR: target UID does not belong to $REQUIRED_PACKAGE"
+        }
+        val routingPermission = ctx.checkPermission(
+            PERMISSION_MODIFY_AUDIO_ROUTING, Process.myPid(), Process.myUid()
+        )
+        if (routingPermission != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return "ERROR: shell UID has no MODIFY_AUDIO_ROUTING permission on this ROM"
+        }
+
+        targetUid = uid
+        audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            ?: return "ERROR: AudioManager unavailable"
+
+        val policyReady = registerWhatsAppOnlyPolicy(ctx, uid)
+        if (!policyReady) {
+            stopInternal()
+            return "ERROR: $status"
+        }
+
+        val record = createMicrophone(ctx)
+        if (record == null) {
+            stopInternal()
+            return "ERROR: could not open shell microphone on this ROM"
+        }
+        microphone = record
+
+        running.set(true)
+        droppedCaptureBlocks = 0
+        droppedOutputBlocks = 0
+        micQueue.clear()
+        outputQueue.clear()
+
+        record.startRecording()
+        if (record.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            stopInternal()
+            return "ERROR: AudioRecord did not enter RECORDSTATE_RECORDING"
+        }
+
+        attachCaptureEffects(record.audioSessionId)
+        startCaptureThread(record)
+        startInjectionThread()
+
+        status = "running: package=$REQUIRED_PACKAGE uid=$uid rate=$RATE source=$captureSource"
+        Log.i(TAG, status)
+        return status
+    }
+
+    private fun registerWhatsAppOnlyPolicy(ctx: Context, uid: Int): Boolean {
+        try {
+            val ruleClass = Class.forName("android.media.audiopolicy.AudioMixingRule")
+            val ruleBuilderClass = Class.forName("android.media.audiopolicy.AudioMixingRule\$Builder")
+            val mixClass = Class.forName("android.media.audiopolicy.AudioMix")
+            val mixBuilderClass = Class.forName("android.media.audiopolicy.AudioMix\$Builder")
+            val policyClass = Class.forName("android.media.audiopolicy.AudioPolicy")
+            val policyBuilderClass = Class.forName("android.media.audiopolicy.AudioPolicy\$Builder")
+            val intClass = Int::class.javaPrimitiveType!!
+
+            val ruleBuilder = ruleBuilderClass.getConstructor().newInstance()
+            val injectorRole = ruleClass.getField("MIX_ROLE_INJECTOR").getInt(null)
+            ruleBuilderClass.getMethod("setTargetMixRole", intClass)
+                .invoke(ruleBuilder, injectorRole)
+
+            val matchUid = ruleClass.getField("RULE_MATCH_UID").getInt(null)
+            ruleBuilderClass.getMethod("addMixRule", intClass, Any::class.java)
+                .invoke(ruleBuilder, matchUid, Integer.valueOf(uid))
+            val rule = ruleBuilderClass.getMethod("build").invoke(ruleBuilder)
+
+            val format = AudioFormat.Builder()
+                .setSampleRate(RATE)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .build()
+
+            val mixBuilder = mixBuilderClass.getConstructor(ruleClass).newInstance(rule)
+            val loopback = mixClass.getField("ROUTE_FLAG_LOOP_BACK").getInt(null)
+            mixBuilderClass.getMethod("setRouteFlags", intClass).invoke(mixBuilder, loopback)
+            mixBuilderClass.getMethod("setFormat", AudioFormat::class.java).invoke(mixBuilder, format)
+            val newMix = mixBuilderClass.getMethod("build").invoke(mixBuilder)
+
+            val handlerThread = HandlerThread("weirdo-audio-policy")
+            handlerThread.start()
+            policyHandlerThread = handlerThread
+
+            val policyBuilder = policyBuilderClass.getConstructor(Context::class.java).newInstance(ctx)
+            runCatching {
+                policyBuilderClass.getMethod("setLooper", android.os.Looper::class.java)
+                    .invoke(policyBuilder, handlerThread.looper)
+            }
+            policyBuilderClass.getMethod("addMix", mixClass).invoke(policyBuilder, newMix)
+            val newPolicy = policyBuilderClass.getMethod("build").invoke(policyBuilder)
+
+            val manager = audioManager ?: error("AudioManager unavailable")
+            val registered = AudioManager::class.java
+                .getMethod("registerAudioPolicy", policyClass)
+                .invoke(manager, newPolicy) as Int
+            if (registered != 0) {
+                status = "registerAudioPolicy returned $registered"
+                return false
+            }
+
+            policy = newPolicy
+            mix = newMix
+
+            val track = policyClass.getMethod("createAudioTrackSource", mixClass)
+                .invoke(newPolicy, newMix) as? AudioTrack
+            if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
+                runCatching { track?.release() }
+                status = "AudioPolicy created an uninitialised injection track"
+                return false
+            }
+            injectionTrack = track
+            track.play()
+            return true
+        } catch (error: Throwable) {
+            val root = error.cause ?: error
+            status = "AudioPolicy setup failed: ${root.javaClass.simpleName}: ${root.message}"
+            Log.e(TAG, status, error)
+            return false
+        }
+    }
+
+    private fun createMicrophone(ctx: Context): AudioRecord? {
+        val minimum = AudioRecord.getMinBufferSize(
+            RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+        )
+        if (minimum <= 0) {
+            status = "AudioRecord.getMinBufferSize returned $minimum"
+            return null
+        }
+        val bytes = max(minimum, BLOCK_SAMPLES * 2 * 4)
+
+        fun build(source: Int): AudioRecord? = runCatching {
+            val builder = AudioRecord.Builder()
+                .setAudioSource(source)
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .build()
+                )
+                .setBufferSizeInBytes(bytes)
+            if (Build.VERSION.SDK_INT >= 30) {
+                runCatching { builder.setPrivacySensitive(false) }
+            }
+            builder.build().takeIf { it.state == AudioRecord.STATE_INITIALIZED }
+                ?: throw IllegalStateException("AudioRecord is not initialised")
+        }.getOrElse {
+            Log.w(TAG, "AudioRecord source=$source failed", it)
+            null
+        }
+
+        var result = build(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+        captureSource = MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        if (result == null) {
+            result = build(MediaRecorder.AudioSource.MIC)
+            captureSource = MediaRecorder.AudioSource.MIC
+        }
+        if (result == null) status = "Both VOICE_COMMUNICATION and MIC AudioRecord paths failed"
+        return result
+    }
+
+    private fun attachCaptureEffects(sessionId: Int) {
+        runCatching { aec?.release() }
+        runCatching { noiseSuppressor?.release() }
+        aec = if (AcousticEchoCanceler.isAvailable()) {
+            runCatching { AcousticEchoCanceler.create(sessionId)?.apply { enabled = true } }
+                .getOrNull()
+        } else null
+        noiseSuppressor = if (NoiseSuppressor.isAvailable()) {
+            runCatching { NoiseSuppressor.create(sessionId)?.apply { enabled = true } }
+                .getOrNull()
+        } else null
+        Log.i(
+            TAG,
+            "Capture effects: AEC=${aec?.enabled}, NS=${noiseSuppressor?.enabled}"
+        )
+    }
+
+    private fun startCaptureThread(record: AudioRecord) {
+        captureThread = Thread({
+            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
+            val samples = ShortArray(BLOCK_SAMPLES)
+            while (running.get() && !Thread.currentThread().isInterrupted) {
+                val count = record.read(samples, 0, samples.size, AudioRecord.READ_BLOCKING)
+                if (count > 0) {
+                    val bytes = ByteArray(count * 2)
+                    for (i in 0 until count) {
+                        val value = samples[i].toInt()
+                        bytes[i * 2] = value.toByte()
+                        bytes[i * 2 + 1] = (value shr 8).toByte()
+                    }
+                    if (!micQueue.offer(bytes)) {
+                        micQueue.poll()
+                        if (!micQueue.offer(bytes)) droppedCaptureBlocks++
+                        else droppedCaptureBlocks++
+                    }
+                } else if (count < 0) {
+                    status = "AudioRecord.read failed: $count"
+                    Log.e(TAG, status)
+                    break
+                }
+            }
+        }, "weirdo-whatsapp-capture").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun startInjectionThread() {
+        injectionThread = Thread({
+            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
+            val comfortNoise = ShortArray(BLOCK_SAMPLES * 2)
+            var noiseSeed = 0x13579b
+            while (running.get() && !Thread.currentThread().isInterrupted) {
+                val mono = try {
+                    outputQueue.poll(10, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    break
+                }
+
+                val stereo = ShortArray(BLOCK_SAMPLES * 2)
+                if (mono == null) {
+                    // Very low level dither avoids a perfectly flat zero stream on
+                    // ROMs whose recorder stops treating an all-zero source as active.
+                    for (i in 0 until BLOCK_SAMPLES) {
+                        noiseSeed = noiseSeed * 1103515245 + 12345
+                        val value = (((noiseSeed ushr 16) and 3) - 1).toShort()
+                        stereo[i * 2] = value
+                        stereo[i * 2 + 1] = value
+                    }
+                } else {
+                    val count = minOf(mono.size, BLOCK_SAMPLES)
+                    for (i in 0 until count) {
+                        stereo[i * 2] = mono[i]
+                        stereo[i * 2 + 1] = mono[i]
+                    }
+                }
+
+                val track = injectionTrack ?: break
+                val written = runCatching {
+                    track.write(stereo, 0, stereo.size, AudioTrack.WRITE_BLOCKING)
+                }.getOrElse {
+                    status = "AudioTrack write threw: ${it.message}"
+                    Log.e(TAG, status, it)
+                    break
+                }
+                if (written < 0) {
+                    status = "AudioTrack.write failed: $written"
+                    Log.e(TAG, status)
+                    break
+                }
+            }
+        }, "weirdo-whatsapp-injection").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    override fun pullInputPcm(waitMs: Int): ByteArray {
+        if (!running.get()) return ByteArray(0)
+        return try {
+            micQueue.poll(waitMs.coerceIn(0, 25).toLong(), TimeUnit.MILLISECONDS) ?: ByteArray(0)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            ByteArray(0)
+        }
+    }
+
+    override fun pushOutputPcm(pcm16le: ByteArray?) {
+        if (!running.get() || pcm16le == null || pcm16le.isEmpty()) return
+        val usableBytes = minOf(pcm16le.size - (pcm16le.size % 2), BLOCK_SAMPLES * 2)
+        if (usableBytes <= 0) return
+        val samples = ShortArray(usableBytes / 2)
+        for (i in samples.indices) {
+            samples[i] = (
+                (pcm16le[i * 2].toInt() and 0xff) or
+                    (pcm16le[i * 2 + 1].toInt() shl 8)
+                ).toShort()
+        }
+        if (!outputQueue.offer(samples)) {
+            outputQueue.poll()
+            if (!outputQueue.offer(samples)) droppedOutputBlocks++
+            else droppedOutputBlocks++
+        }
+    }
+
+    override fun getStatus(): String =
+        "$status; micQueue=${micQueue.size}; outQueue=${outputQueue.size}; " +
+            "dropIn=$droppedCaptureBlocks; dropOut=$droppedOutputBlocks"
+
+    override fun stop() {
+        val token = Binder.clearCallingIdentity()
+        try {
+            stopInternal()
+        } finally {
+            Binder.restoreCallingIdentity(token)
+        }
+    }
+
+    private fun stopInternal() {
+        if (!running.getAndSet(false) && policy == null && microphone == null && injectionTrack == null) {
+            status = "idle"
+            return
+        }
+        status = "stopping"
+        micQueue.clear()
+        outputQueue.clear()
+
+        val rec = microphone
+        microphone = null
+        runCatching { rec?.stop() }
+        runCatching { rec?.release() }
+
+        val track = injectionTrack
+        injectionTrack = null
+        runCatching { track?.pause() }
+        runCatching { track?.flush() }
+        runCatching { track?.stop() }
+        runCatching { track?.release() }
+
+        captureThread?.interrupt()
+        injectionThread?.interrupt()
+        runCatching { captureThread?.join(350) }
+        runCatching { injectionThread?.join(350) }
+        captureThread = null
+        injectionThread = null
+
+        runCatching { aec?.release() }
+        runCatching { noiseSuppressor?.release() }
+        aec = null
+        noiseSuppressor = null
+
+        val manager = audioManager
+        val activePolicy = policy
+        policy = null
+        mix = null
+        if (manager != null && activePolicy != null) {
+            runCatching {
+                val type = Class.forName("android.media.audiopolicy.AudioPolicy")
+                AudioManager::class.java.getMethod("unregisterAudioPolicy", type)
+                    .invoke(manager, activePolicy)
+            }.onFailure { Log.w(TAG, "unregisterAudioPolicy failed", it) }
+        }
+
+        runCatching { policyHandlerThread?.quitSafely() }
+        policyHandlerThread = null
+        audioManager = null
+        targetUid = -1
+        status = "stopped"
+        Log.i(TAG, "WhatsApp injection stopped; true microphone restored")
+    }
+
+    override fun destroy() {
+        stopInternal()
+    }
+}
