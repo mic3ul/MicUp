@@ -28,15 +28,9 @@ import kotlin.math.max
  *
  * This is not an acoustic speaker/microphone loop and never targets all apps.
  */
-class WhatsAppAudioUserService : IWhatsAppMicInjector.Stub {
-
-    @Keep
-    constructor() : super()
-
-    @Keep
-    constructor(context: Context) : super() {
-        this.context = context.applicationContext
-    }
+class WhatsAppAudioUserService(
+    appContext: Context? = null
+) : IWhatsAppMicInjector.Stub() {
 
     companion object {
         private const val TAG = "WeirdoWhatsAppInjector"
@@ -52,7 +46,7 @@ class WhatsAppAudioUserService : IWhatsAppMicInjector.Stub {
     private val micQueue = ArrayBlockingQueue<ByteArray>(MAX_QUEUE_BLOCKS)
     private val outputQueue = ArrayBlockingQueue<ShortArray>(MAX_QUEUE_BLOCKS)
 
-    @Volatile private var context: Context? = null
+    @Volatile private var context: Context? = appContext?.applicationContext
     @Volatile private var audioManager: AudioManager? = null
     @Volatile private var policy: Any? = null
     @Volatile private var mix: Any? = null
