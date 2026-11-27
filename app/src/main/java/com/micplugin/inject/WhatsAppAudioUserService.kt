@@ -319,20 +319,28 @@ class WhatsAppAudioUserService(
                 trackFormat.sampleRate / 100 * channelCount * bytesPerSample * 2,
             )
 
-            val builder = AudioTrack.Builder()
-                .setAudioAttributes(attributesBuilder.build())
-                .setAudioFormat(trackFormat)
-                .setBufferSizeInBytes(safeBuffer)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            fun buildTrack(performanceMode: Int): AudioTrack {
+                val builder = AudioTrack.Builder()
+                    .setAudioAttributes(attributesBuilder.build())
+                    .setAudioFormat(trackFormat)
+                    .setBufferSizeInBytes(safeBuffer)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .setPerformanceMode(performanceMode)
 
-            AudioTrack.Builder::class.java
-                .getMethod("setContext", Context::class.java)
-                .invoke(builder, ctx)
+                AudioTrack.Builder::class.java
+                    .getMethod("setContext", Context::class.java)
+                    .invoke(builder, ctx)
 
-            (builder.build() as AudioTrack).takeIf {
-                it.state == AudioTrack.STATE_INITIALIZED
+                return builder.build()
             }
+
+            val track = runCatching {
+                buildTrack(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            }.getOrElse { error ->
+                Log.w(TAG, "Low-latency AudioTrack mode unsupported; retrying normal performance mode", error)
+                buildTrack(AudioTrack.PERFORMANCE_MODE_NONE)
+            }
+            track.takeIf { it.state == AudioTrack.STATE_INITIALIZED }
         } catch (error: Throwable) {
             lastTrackError = "${error.cause?.message ?: error.message ?: error.javaClass.simpleName}"
             Log.w(TAG, "Context-bound AudioTrack fallback failed: $lastTrackError", error)
