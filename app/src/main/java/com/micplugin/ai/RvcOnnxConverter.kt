@@ -37,7 +37,9 @@ class RvcOnnxConverter private constructor(
     private val embedder: OrtSession,
     private val rmvpe: OrtSession?,
     private val metadata: Metadata,
+    private val embedderInputName: String,
     private val outputName: String,
+    private val rmvpeInputName: String,
     private val sessionOptions: OrtSession.SessionOptions,
 ) : Closeable {
 
@@ -50,9 +52,16 @@ class RvcOnnxConverter private constructor(
         val embedderName: String,
         val outputLayer: Int,
         val useFinalProjection: Boolean,
+        val streamInputFrames: Int = 0,
+        val streamOutputFrames: Int = 0,
+        val streamStepFrames: Int = 0,
     )
 
     data class ConvertedAudio(val samples: FloatArray, val sampleRate: Int)
+
+    val isStreamingModel: Boolean get() = metadata.streamInputFrames > 0 && metadata.streamOutputFrames > 0
+    val streamingOutputFrames: Int get() = metadata.streamOutputFrames
+    val streamingStepFrames: Int get() = metadata.streamStepFrames
 
     companion object {
         const val MAX_INPUT_SECONDS = 15
@@ -84,31 +93,34 @@ class RvcOnnxConverter private constructor(
                 }
                 pitchSession = env.createSession(pitchFile.absolutePath, options)
 
-                require("audio" in embedSession.inputInfo) {
-                    "The ContentVec model must expose an 'audio' input."
+                val embeddingInput = when {
+                    "input_values" in embedSession.inputInfo -> "input_values"
+                    "audio" in embedSession.inputInfo -> "audio"
+                    "source" in embedSession.inputInfo -> "source"
+                    else -> error("Unsupported ContentVec input: ${embedSession.inputInfo.keys}")
                 }
-                require("waveform" in pitchSession.inputInfo && "threshold" in pitchSession.inputInfo) {
-                    "The RMVPE model must expose 'waveform' and 'threshold' inputs."
+                val pitchInput = when {
+                    "input" in pitchSession.inputInfo -> "input"
+                    "waveform" in pitchSession.inputInfo && "threshold" in pitchSession.inputInfo -> "waveform"
+                    else -> error("Unsupported RMVPE input: ${pitchSession.inputInfo.keys}")
                 }
-                require("feats" in synthSession.inputInfo && "audio" in synthSession.outputInfo) {
-                    "The RVC synthesizer must expose 'feats' input and 'audio' output."
+                require("feats" in synthSession.inputInfo && "p_len" in synthSession.inputInfo &&
+                    "sid" in synthSession.inputInfo && "pitch" in synthSession.inputInfo &&
+                    "pitchf" in synthSession.inputInfo && "audio" in synthSession.outputInfo) {
+                    "The RVC synthesizer must expose feats/p_len/sid/pitch/pitchf inputs and audio output."
                 }
 
                 val output = when {
-                    meta.outputLayer == 12 && !meta.useFinalProjection -> "unit12"
-                    meta.outputLayer == 9 && meta.useFinalProjection -> "units9"
-                    meta.outputLayer == 12 && meta.useFinalProjection -> "unit12s"
-                    else -> error(
-                        "Unsupported embedder layer settings: layer=${meta.outputLayer}, " +
-                            "finalProjection=${meta.useFinalProjection}"
-                    )
-                }
-                require(output in embedSession.outputInfo) {
-                    "ContentVec is missing '$output' output. Available: ${embedSession.outputInfo.keys}"
+                    "unit12" in embedSession.outputInfo && meta.outputLayer == 12 && !meta.useFinalProjection -> "unit12"
+                    "units9" in embedSession.outputInfo && meta.outputLayer == 9 && meta.useFinalProjection -> "units9"
+                    "unit12s" in embedSession.outputInfo && meta.outputLayer == 12 && meta.useFinalProjection -> "unit12s"
+                    "hidden_states" in embedSession.outputInfo -> "hidden_states"
+                    "embed" in embedSession.outputInfo -> "embed"
+                    else -> error("Unsupported ContentVec outputs: ${embedSession.outputInfo.keys}")
                 }
 
                 return RvcOnnxConverter(
-                    synthSession, embedSession, pitchSession, meta, output, options
+                    synthSession, embedSession, pitchSession, meta, embeddingInput, output, pitchInput, options
                 )
             } catch (error: Throwable) {
                 runCatching { pitchSession?.close() }
@@ -130,6 +142,9 @@ class RvcOnnxConverter private constructor(
                 embedderName = json.getString("embedder"),
                 outputLayer = json.getInt("embOutputLayer"),
                 useFinalProjection = json.optBoolean("useFinalProj", false),
+                streamInputFrames = json.optInt("streamInputFrames", 0),
+                streamOutputFrames = json.optInt("streamOutputFrames", 0),
+                streamStepFrames = json.optInt("streamStepFrames", 0),
             )
             require(result.sampleRate in 32000..48000) {
                 "Unsupported synthesizer sample rate: ${result.sampleRate}"
@@ -217,10 +232,11 @@ class RvcOnnxConverter private constructor(
         val features = runEmbedder(source16k)
         progress(0.42f)
 
-        val pitch = runPitch(source16k, pitchShiftSemitones)
+        val frames2x = features.frames * 2
+        val targetFrames = if (metadata.streamInputFrames > 0) metadata.streamInputFrames else frames2x
+        val pitch = runPitch(source16k, pitchShiftSemitones, targetFrames)
         progress(0.62f)
 
-        val frames2x = features.frames * 2
         val expanded = FloatArray(frames2x * features.channels)
         for (frame in 0 until features.frames) {
             val srcOffset = frame * features.channels
@@ -229,9 +245,11 @@ class RvcOnnxConverter private constructor(
             System.arraycopy(features.values, srcOffset, expanded, dstOffset + features.channels, features.channels)
         }
 
-        val alignedFrames = min(frames2x, pitch.first.size)
+        val alignedFrames = min(targetFrames, pitch.first.size)
         require(alignedFrames > 0) { "RVC models returned no aligned frames." }
-        val alignedFeats = if (alignedFrames == frames2x) expanded else expanded.copyOf(alignedFrames * features.channels)
+        val alignedFeats = alignFeatureFrames(
+            expanded, frames2x, alignedFrames, features.channels
+        )
         val pitchCoarse = pitch.second.copyOf(alignedFrames)
         val pitchFine = pitch.first.copyOf(alignedFrames)
         progress(0.72f)
@@ -248,12 +266,45 @@ class RvcOnnxConverter private constructor(
         return ConvertedAudio(output, metadata.sampleRate)
     }
 
+    private fun alignFeatureFrames(
+        source: FloatArray,
+        sourceFrames: Int,
+        targetFrames: Int,
+        channels: Int,
+    ): FloatArray {
+        require(sourceFrames > 0 && targetFrames > 0)
+        if (sourceFrames == targetFrames) return source
+        val output = FloatArray(targetFrames * channels)
+        if (sourceFrames > targetFrames) {
+            val start = (sourceFrames - targetFrames) * channels
+            System.arraycopy(source, start, output, 0, output.size)
+        } else {
+            System.arraycopy(source, 0, output, 0, source.size)
+            val last = (sourceFrames - 1) * channels
+            for (frame in sourceFrames until targetFrames) {
+                System.arraycopy(source, last, output, frame * channels, channels)
+            }
+        }
+        return output
+    }
+
     private data class Features(val values: FloatArray, val frames: Int, val channels: Int)
 
     private fun runEmbedder(audio16k: FloatArray): Features {
-        val input = floatTensor(audio16k, longArrayOf(1, audio16k.size.toLong()))
+        val inputShape = if (embedderInputName == "source") {
+            longArrayOf(1, 1, audio16k.size.toLong())
+        } else {
+            longArrayOf(1, audio16k.size.toLong())
+        }
+        val input = floatTensor(audio16k, inputShape)
+        val inputMap = linkedMapOf<String, OnnxTensor>(embedderInputName to input)
+        if ("attention_mask" in embedder.inputInfo) {
+            inputMap["attention_mask"] = longTensor(
+                LongArray(audio16k.size) { 1L }, longArrayOf(1, audio16k.size.toLong())
+            )
+        }
         try {
-            embedder.run(mapOf("audio" to input), setOf(outputName)).use { result ->
+            embedder.run(inputMap, setOf(outputName)).use { result ->
                 val tensor = result.get(outputName).orElseThrow { IllegalStateException("ContentVec output is missing.") } as OnnxTensor
                 val shape = (tensor.info as TensorInfo).shape
                 require(shape.size == 3 && shape[0] == 1L) {
@@ -267,27 +318,112 @@ class RvcOnnxConverter private constructor(
                 return Features(tensor.copyFloatValues(), frames, channels)
             }
         } finally {
-            input.close()
+            inputMap.values.forEach { runCatching { it.close() } }
         }
     }
 
-    private fun runPitch(audio16k: FloatArray, shift: Int): Pair<FloatArray, LongArray> {
+    private fun runPitch(
+        audio16k: FloatArray,
+        shift: Int,
+        targetFrames: Int,
+    ): Pair<FloatArray, LongArray> {
         val session = requireNotNull(rmvpe)
+        val rawF0 = if (rmvpeInputName == "input") {
+            runRmvpeLogMel(session, audio16k)
+        } else {
+            runRmvpeWaveform(session, audio16k)
+        }
+        val aligned = resamplePitchFrames(rawF0, targetFrames)
+        val factor = 2.0.pow(shift / 12.0).toFloat()
+        val fine = if (shift == 0) aligned else FloatArray(aligned.size) { aligned[it] * factor }
+        return fine to quantizePitch(fine)
+    }
+
+    private fun runRmvpeWaveform(session: OrtSession, audio16k: FloatArray): FloatArray {
         val waveform = floatTensor(audio16k, longArrayOf(1, audio16k.size.toLong()))
         val threshold = floatTensor(floatArrayOf(0.3f), longArrayOf(1))
         try {
             session.run(mapOf("waveform" to waveform, "threshold" to threshold)).use { result ->
                 val outputName = session.outputInfo.keys.first()
                 val tensor = result.get(outputName).orElseThrow { IllegalStateException("RMVPE output is missing.") } as OnnxTensor
-                val raw = tensor.copyFloatValues()
-                val factor = 2.0.pow(shift / 12.0).toFloat()
-                val fine = if (shift == 0) raw else FloatArray(raw.size) { raw[it] * factor }
-                return fine to quantizePitch(fine)
+                return tensor.copyFloatValues()
             }
         } finally {
             waveform.close()
             threshold.close()
         }
+    }
+
+    private fun runRmvpeLogMel(session: OrtSession, audio16k: FloatArray): FloatArray {
+        val mel = RmvpeMelFrontend.compute(audio16k)
+        val input = floatTensor(
+            mel.values,
+            longArrayOf(1, 128, mel.paddedFrames.toLong())
+        )
+        try {
+            session.run(mapOf("input" to input)).use { result ->
+                val outputName = session.outputInfo.keys.first()
+                val tensor = result.get(outputName).orElseThrow { IllegalStateException("RMVPE output is missing.") } as OnnxTensor
+                val shape = (tensor.info as TensorInfo).shape
+                require(shape.size == 3 && shape[0] == 1L && shape[2] == 360L) {
+                    "RMVPE output must be [1,T,360], got ${shape.contentToString()}."
+                }
+                val flat = tensor.copyFloatValues()
+                val validFrames = min(mel.frames, shape[1].toInt())
+                val f0 = FloatArray(validFrames)
+                for (frame in 0 until validFrames) {
+                    var maximum = 0f
+                    var weightedBins = 0.0
+                    val base = frame * 360
+                    for (bin in 0 until 360) {
+                        val probability = flat[base + bin]
+                        if (probability > maximum) maximum = probability
+                        weightedBins += probability * bin
+                    }
+                    f0[frame] = if (maximum > 0.003f) {
+                        (32.7 * 2.0.pow((weightedBins * 20.0) / 1200.0)).toFloat()
+                    } else 0f
+                }
+                interpolateUnvoiced(f0)
+                return f0
+            }
+        } finally {
+            input.close()
+        }
+    }
+
+    private fun interpolateUnvoiced(values: FloatArray) {
+        val voiced = values.indices.filter { values[it] > 0f }
+        if (voiced.isEmpty()) return
+        val first = voiced.first()
+        for (i in 0 until first) values[i] = values[first]
+        for (pair in 0 until voiced.lastIndex) {
+            val start = voiced[pair]
+            val end = voiced[pair + 1]
+            if (end - start <= 1) continue
+            val a = values[start]
+            val b = values[end]
+            for (i in start + 1 until end) {
+                val t = (i - start).toFloat() / (end - start)
+                values[i] = a + (b - a) * t
+            }
+        }
+        val last = voiced.last()
+        for (i in last + 1 until values.size) values[i] = values[last]
+    }
+
+    private fun resamplePitchFrames(source: FloatArray, targetFrames: Int): FloatArray {
+        require(source.isNotEmpty() && targetFrames > 0)
+        if (source.size == targetFrames) return source
+        val result = FloatArray(targetFrames)
+        for (i in 0 until targetFrames) {
+            val position = i.toDouble() * source.size / targetFrames
+            val lower = position.toInt().coerceIn(0, source.lastIndex)
+            val upper = min(lower + 1, source.lastIndex)
+            val fraction = (position - lower).toFloat()
+            result[i] = source[lower] + (source[upper] - source[lower]) * fraction
+        }
+        return result
     }
 
     private fun runSynthesizer(
