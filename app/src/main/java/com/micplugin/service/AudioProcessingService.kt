@@ -339,6 +339,7 @@ class AudioProcessingService : Service() {
             return
         }
 
+        WhatsAppLiveState.setActive(false, "Loading the selected RVC streaming model and shared base models…")
         updateNotification("Loading live RVC models…", 0, 0f)
         val converter = try {
             RvcOnnxConverter.load(
