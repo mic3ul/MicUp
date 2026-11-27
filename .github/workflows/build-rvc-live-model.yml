@@ -83,8 +83,9 @@ jobs:
               assert {"feats", "p_len", "pitch", "pitchf", "sid"} <= inputs, (name, inputs)
               assert "audio" in outputs, (name, outputs)
               meta = {p.key: p.value for p in model.metadata_props}
-              assert '"streaming": true' in meta.get("metadata", ""), meta
-              assert f'"streamOutputFrames": {frames}' in meta["metadata"], meta
+              metadata = __import__("json").loads(meta["metadata"])
+              assert metadata["streaming"] is True, metadata
+              assert metadata["streamOutputFrames"] == frames, metadata
               size = path.stat().st_size
               assert size > 1024 * 1024, f"{name} unexpectedly small: {size}"
               print(f"PASS {name}: {size / 1024 / 1024:.1f} MiB")
