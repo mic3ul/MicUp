@@ -54,10 +54,14 @@ class TailStreamingSynth(torch.nn.Module):
             # the final fixed-duration tail. This is correct but more costly;
             # on-device latency must be measured before choosing this model.
             audio = net.dec(z * x_mask, pitchf, g=g)[0, 0, -convert_length:]
-        if audio.numel() != convert_length:
+        # infer_realtime retains a small left receptive-field guard. Keep
+        # the exact newest interval so the streaming hop is sample-accurate.
+        if audio.numel() < convert_length:
             raise RuntimeError(
-                f"Streaming generator returned {audio.numel()} samples; expected {convert_length}"
+                f"Streaming generator returned only {audio.numel()} samples; "
+                f"expected at least {convert_length}"
             )
+        audio = audio[-convert_length:]
         return torch.clip(audio, -1.0, 1.0)
 
 
