@@ -29,7 +29,14 @@ internal class RvcChunkCrossfader(
         previousTail = currentTail
 
         if (previous == null) {
-            return converted.copyOfRange(0, stepSamples)
+            val first = converted.copyOfRange(0, stepSamples)
+            // Fade in the first 50 ms after startup or an inference gap to
+            // prevent a discontinuity click at the boundary.
+            for (i in 0 until overlapSamples) {
+                val gain = i.toFloat() / (overlapSamples - 1).coerceAtLeast(1)
+                first[i] *= gain
+            }
+            return first
         }
 
         val output = FloatArray(stepSamples)
