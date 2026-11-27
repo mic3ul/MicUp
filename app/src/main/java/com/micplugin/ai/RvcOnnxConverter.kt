@@ -29,8 +29,9 @@ import kotlin.math.roundToInt
  * a speaker synthesizer, a ContentVec/HuBERT embedder, and (for F0 models)
  * an RMVPE pitch extractor. No third-party application source is bundled.
  *
- * Inference is clip-based, not real-time. Keep inputs short on phones with
- * limited RAM; 30 seconds is the supported upper bound for this mobile build.
+ * The same inference path supports short recorded clips and fixed-window RVC
+ * stream models. Streaming models declare their required feature frame count
+ * and emit a fixed-duration tail chunk for an external overlap/crossfade worker.
  */
 class RvcOnnxConverter private constructor(
     private val synth: OrtSession,
@@ -415,13 +416,15 @@ class RvcOnnxConverter private constructor(
     private fun resamplePitchFrames(source: FloatArray, targetFrames: Int): FloatArray {
         require(source.isNotEmpty() && targetFrames > 0)
         if (source.size == targetFrames) return source
+        // RMVPE log-mel emits one F0 frame every 10 ms, exactly the RVC
+        // synthesizer's post-2x ContentVec frame grid. Preserve timestamps:
+        // take the first target frames and only repeat the last value if short.
         val result = FloatArray(targetFrames)
-        for (i in 0 until targetFrames) {
-            val position = i.toDouble() * source.size / targetFrames
-            val lower = position.toInt().coerceIn(0, source.lastIndex)
-            val upper = min(lower + 1, source.lastIndex)
-            val fraction = (position - lower).toFloat()
-            result[i] = source[lower] + (source[upper] - source[lower]) * fraction
+        val copied = min(source.size, targetFrames)
+        System.arraycopy(source, 0, result, 0, copied)
+        if (copied < targetFrames) {
+            val last = source.last()
+            for (i in copied until targetFrames) result[i] = last
         }
         return result
     }
