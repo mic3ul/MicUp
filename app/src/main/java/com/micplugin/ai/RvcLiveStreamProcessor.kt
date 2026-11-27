@@ -165,6 +165,7 @@ class RvcLiveStreamProcessor(
             val startedAt = System.nanoTime()
             try {
                 val converted = converter.convert(window, INPUT_SAMPLE_RATE)
+                if (!running.get()) break
                 require(converted.sampleRate == outputSampleRate) {
                     "RVC returned ${converted.sampleRate} Hz, expected $outputSampleRate Hz."
                 }
