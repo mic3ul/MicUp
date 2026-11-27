@@ -86,6 +86,57 @@ bool AudioEngine::start() {
     return true;
 }
 
+bool AudioEngine::startExternal() {
+    if (running_.load(std::memory_order_acquire)) {
+        // Never allow external PCM and the Oboe microphone callback to drive
+        // the same DSP state concurrently.
+        if (inputStream_) stop();
+        else return true;
+    }
+    ring_.reset();
+    sampleRate_ = 48000;
+    framesPerBurst_ = 960;
+    highpassAlpha_ = std::exp(-2.0f * static_cast<float>(M_PI) * 72.0f /
+                              static_cast<float>(sampleRate_));
+    cleanupPrevSample_ = 0.0f;
+    highpassPrevInput_ = 0.0f;
+    highpassPrevOutput_ = 0.0f;
+    vocalUpperLowpass_ = 0.0f;
+    vocalAirLowpass_ = 0.0f;
+    vocalSibilanceEnvelope_ = 0.0f;
+    pitchShifter_.clear();
+    pitchShifter_.setSampleRate(static_cast<uint>(sampleRate_));
+    pitchShifter_.setChannels(1);
+    pitchShifter_.setSetting(SETTING_SEQUENCE_MS, 40);
+    pitchShifter_.setSetting(SETTING_SEEKWINDOW_MS, 15);
+    pitchShifter_.setSetting(SETTING_OVERLAP_MS, 8);
+    pitchShifter_.setPitchSemiTones(0.0);
+    pitchSemitoneCache_ = 0.0f;
+    pitchFifoHead_ = 0;
+    pitchFifoTail_ = 0;
+    pitchWasEnabled_ = false;
+    pitchConfigValid_ = true;
+    eqDirty_ = true;
+    rebuildEQ();
+    running_.store(true, std::memory_order_release);
+    LOGI("AudioEngine started in external PCM mode: %dHz", sampleRate_);
+    return true;
+}
+
+void AudioEngine::processExternal(float* samples, int32_t frames) {
+    if (samples == nullptr || frames <= 0 || frames > kMaxFrames ||
+        !running_.load(std::memory_order_acquire)) return;
+
+    measureLevel(samples, frames, params_.inputLevelDb);
+    if (!params_.masterBypass.load(std::memory_order_relaxed)) {
+        processEffectsChain(samples, frames);
+    }
+    if (pluginHost_) {
+        pluginHost_->process(samples, frames, sampleRate_);
+    }
+    measureLevel(samples, frames, params_.outputLevelDb);
+}
+
 void AudioEngine::stop() {
     running_.store(false, std::memory_order_release);
     closeStreams();
@@ -637,6 +688,26 @@ JNIEXPORT jboolean JNICALL
 Java_com_micplugin_audio_OboeEngine_nativeStart(JNIEnv*, jobject, jlong handle) {
     auto* engine = reinterpret_cast<AudioEngine*>(handle);
     return engine->start() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_micplugin_audio_OboeEngine_nativeStartExternal(JNIEnv*, jobject, jlong handle) {
+    auto* engine = reinterpret_cast<AudioEngine*>(handle);
+    return engine && engine->startExternal() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_micplugin_audio_OboeEngine_nativeProcessExternal(
+    JNIEnv* env, jobject, jlong handle, jfloatArray pcm) {
+    auto* engine = reinterpret_cast<AudioEngine*>(handle);
+    if (engine == nullptr || pcm == nullptr) return;
+    const jsize count = env->GetArrayLength(pcm);
+    if (count <= 0 || count > 1024) return;
+    float samples[1024];
+    env->GetFloatArrayRegion(pcm, 0, count, samples);
+    if (env->ExceptionCheck()) return;
+    engine->processExternal(samples, count);
+    env->SetFloatArrayRegion(pcm, 0, count, samples);
 }
 
 JNIEXPORT void JNICALL
