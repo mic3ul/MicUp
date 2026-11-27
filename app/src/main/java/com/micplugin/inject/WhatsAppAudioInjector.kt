@@ -20,8 +20,14 @@ import javax.inject.Singleton
 
 object WhatsAppLiveState {
     private val mutableMessage = kotlinx.coroutines.flow.MutableStateFlow("WhatsApp live mic is off")
+    private val mutableActive = kotlinx.coroutines.flow.MutableStateFlow(false)
     val message: kotlinx.coroutines.flow.StateFlow<String> = mutableMessage
+    val active: kotlinx.coroutines.flow.StateFlow<Boolean> = mutableActive
     internal fun set(value: String) { mutableMessage.value = value }
+    internal fun setActive(value: Boolean, message: String) {
+        mutableActive.value = value
+        mutableMessage.value = message
+    }
 }
 
 /**
