@@ -273,7 +273,7 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                     )
                 }
                 Text(
-                    "Routes the processed physical microphone into the official WhatsApp voice-note recorder while you hold the record button. No speaker loop and no audio attachment.",
+                    "Runs streaming RVC on the live microphone, then injects the result into the official WhatsApp PTT recorder. Select Shadowww T02 500 ms + ContentVec INT8 + RMVPE INT8 in AI Voice Studio first; start here, wait until RVC is ready, then hold WhatsApp voice-note record. No speaker loop or audio attachment.",
                     fontSize = 10.sp,
                     color = StudioColors.TextMuted,
                 )
@@ -410,7 +410,7 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                     letterSpacing = 1.2.sp,
                 )
                 Text(
-                    "Neural timbre conversion for recorded clips. Import a compatible RVC synthesizer, ContentVec/HuBERT and RMVPE ONNX model, plus a PCM16 WAV source. Not a live microphone effect.",
+                    "Choose the three ONNX models here. Select shadowww_t02_stream_500ms.onnx for live WhatsApp, contentvec_768l12_q8.onnx and rmvpe_q8.onnx. The WAV controls below remain available for offline preview; the same saved model selection also feeds the live PTT route.",
                     fontSize = 10.sp,
                     color = StudioColors.TextMuted,
                 )
