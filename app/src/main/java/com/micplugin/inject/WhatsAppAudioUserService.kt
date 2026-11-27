@@ -540,7 +540,12 @@ class WhatsAppAudioUserService(
         Log.i(TAG, "WhatsApp injection stopped; true microphone restored")
     }
 
+    override fun exit() {
+        stopInternal()
+    }
+
     override fun destroy() {
         stopInternal()
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 }
