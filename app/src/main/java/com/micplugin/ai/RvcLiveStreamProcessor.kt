@@ -4,10 +4,7 @@ import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
-import kotlin.math.cos
-import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.PI
 
 /**
  * Fixed-window streaming adapter for a TailStreamingSynth ONNX model.
@@ -50,7 +47,6 @@ class RvcLiveStreamProcessor(
     private var samplesSinceWindow = 0
     private var pendingWindow: FloatArray? = null
     private var workerActive = false
-    private var previousTail: FloatArray? = null
     private val executor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "weirdo-rvc-live").apply {
             isDaemon = true
@@ -71,6 +67,7 @@ class RvcLiveStreamProcessor(
     private val overlapSamples = DEFAULT_OVERLAP_FRAMES * samplesPerFrame
     private val stepSamples = stepFrames * samplesPerFrame
     private val outputSamples = outputFrames * samplesPerFrame
+    private val crossfader = RvcChunkCrossfader(stepSamples, overlapSamples)
 
     init {
         require(converter.isStreamingModel) {
@@ -96,7 +93,7 @@ class RvcLiveStreamProcessor(
             samplesSinceWindow = 0
             pendingWindow = null
             workerActive = false
-            previousTail = null
+            crossfader.reset()
             ring.fill(0f)
         }
         publishStats(ready = false)
@@ -169,7 +166,7 @@ class RvcLiveStreamProcessor(
                 require(converted.samples.size == outputSamples) {
                     "RVC returned \${converted.samples.size} samples; model metadata requires $outputSamples."
                 }
-                val output = crossfadeAndAdvance(converted.samples)
+                val output = crossfader.emit(converted.samples)
                 onOutput(output)
                 val elapsed = (System.nanoTime() - startedAt) / 1_000_000L
                 lastInferenceMs = elapsed
@@ -183,41 +180,6 @@ class RvcLiveStreamProcessor(
             }
         }
         synchronized(lock) { workerActive = false }
-    }
-
-    /**
-     * First output: send 300/500 ms and retain its final 50 ms.
-     * Later outputs: crossfade the retained tail with the new head, send
-     * exactly one stride, and retain the new output's final 50 ms.
-     */
-    private fun crossfadeAndAdvance(converted: FloatArray): FloatArray {
-        val tailStart = stepSamples
-        val tailEnd = stepSamples + overlapSamples
-        val currentTail = converted.copyOfRange(tailStart, tailEnd)
-        val previous = previousTail
-
-        if (previous == null) {
-            previousTail = currentTail
-            return converted.copyOfRange(0, stepSamples)
-        }
-
-        val emitted = FloatArray(stepSamples)
-        for (i in 0 until overlapSamples) {
-            val t = i.toFloat() / max(1, overlapSamples - 1)
-            // A linear crossfade preserves a stable amplitude for correlated
-            // neighboring RVC frames and avoids a loudness bump at joins.
-            emitted[i] = previous[i] * (1f - t) + converted[i] * t
-        }
-        val remainderCount = stepSamples - overlapSamples
-        System.arraycopy(
-            converted,
-            overlapSamples,
-            emitted,
-            overlapSamples,
-            remainderCount,
-        )
-        previousTail = currentTail
-        return emitted
     }
 
     private fun publishStats(ready: Boolean) {
@@ -241,7 +203,7 @@ class RvcLiveStreamProcessor(
         running.set(false)
         synchronized(lock) {
             pendingWindow = null
-            previousTail = null
+            crossfader.reset()
             ring.fill(0f)
         }
         // Let an in-flight ONNX call leave its worker before the owner closes
