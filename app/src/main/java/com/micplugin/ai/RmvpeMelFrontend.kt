@@ -6,6 +6,7 @@ import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.ln
 import kotlin.math.log10
+import kotlin.math.pow
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -176,5 +177,4 @@ internal object RmvpeMelFrontend {
         }
     }
 
-    private fun Double.pow(exponent: Double): Double = kotlin.math.pow(this, exponent)
 }
