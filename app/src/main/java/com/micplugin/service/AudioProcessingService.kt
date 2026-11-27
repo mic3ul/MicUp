@@ -283,7 +283,7 @@ class AudioProcessingService : Service() {
         }
 
         whatsAppLiveActive = true
-        WhatsAppLiveState.set("WhatsApp live microphone active · DSP path")
+        WhatsAppLiveState.setActive(true, "WhatsApp live microphone active · DSP processing")
         startWhatsAppPcmPump()
         updateNotification("WhatsApp live mic · UID restricted", 0, 20f)
         android.util.Log.i("weirdo.WhatsAppLive", "Live route ready: $routeResult")
@@ -294,7 +294,7 @@ class AudioProcessingService : Service() {
         whatsAppLiveActive = false
         runCatching { whatsAppAudioInjector.stopWhatsApp() }
         audioEngine.stop()
-        WhatsAppLiveState.set("WhatsApp live mic is off; physical microphone restored")
+        WhatsAppLiveState.setActive(false, "WhatsApp live mic is off; physical microphone restored")
     }
 
     private suspend fun startStandardAudioMode() {
