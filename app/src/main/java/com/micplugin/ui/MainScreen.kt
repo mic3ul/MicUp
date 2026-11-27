@@ -36,6 +36,9 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
     val pitchState  by vm.pitchState.collectAsState()
     val vocalShine  by vm.vocalShine.collectAsState()
     val rvcStudio   by vm.rvcStudio.collectAsState()
+    val whatsAppLiveMessage by vm.whatsAppLiveState.collectAsState()
+    val whatsAppLiveActive by vm.whatsAppLiveActive.collectAsState()
+    val shizukuState by vm.shizukuState.collectAsState()
     val bypass      by vm.masterBypass.collectAsState()
     val monitoring  by vm.monitoringEnabled.collectAsState()
     val presets     by vm.presets.collectAsState()
@@ -233,6 +236,103 @@ fun MainScreen(navController: NavController, vm: AudioViewModel = hiltViewModel(
                         checkedTrackColor   = StudioColors.Accent,
                         uncheckedTrackColor = StudioColors.Border,
                     ),
+                )
+            }
+        }
+
+        // ── WhatsApp live microphone route ────────────────────────────────────
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(8.dp),
+            color = StudioColors.Card,
+            border = BorderStroke(
+                1.dp,
+                if (whatsAppLiveActive) StudioColors.Accent else StudioColors.Border,
+            ),
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        "WHATSAPP LIVE MIC",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = StudioColors.TextPrimary,
+                        letterSpacing = 1.1.sp,
+                    )
+                    Text(
+                        if (whatsAppLiveActive) "ACTIVE" else "OFF",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (whatsAppLiveActive) StudioColors.Accent else StudioColors.TextMuted,
+                    )
+                }
+                Text(
+                    "Routes the processed physical microphone into the official WhatsApp voice-note recorder while you hold the record button. No speaker loop and no audio attachment.",
+                    fontSize = 10.sp,
+                    color = StudioColors.TextMuted,
+                )
+                Text(
+                    "Shizuku: " + when (shizukuState) {
+                        com.micplugin.service.ShizukuState.READY -> "Authorized"
+                        com.micplugin.service.ShizukuState.NEED_GRANT -> "Permission required"
+                        com.micplugin.service.ShizukuState.UNAVAILABLE -> "Not running"
+                    },
+                    fontSize = 10.sp,
+                    color = when (shizukuState) {
+                        com.micplugin.service.ShizukuState.READY -> StudioColors.Accent
+                        else -> StudioColors.MeterAmber
+                    },
+                )
+                Text(
+                    whatsAppLiveMessage,
+                    fontSize = 10.sp,
+                    color = StudioColors.TextMuted,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (shizukuState != com.micplugin.service.ShizukuState.READY && !whatsAppLiveActive) {
+                        OutlinedButton(
+                            onClick = vm::requestShizukuPermission,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(
+                                if (shizukuState == com.micplugin.service.ShizukuState.UNAVAILABLE)
+                                    "Check Shizuku"
+                                else "Grant Shizuku permission",
+                                fontSize = 10.sp,
+                            )
+                        }
+                    } else if (!whatsAppLiveActive) {
+                        Button(
+                            onClick = { vm.startWhatsAppLive(context) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("Start WhatsApp live mic", fontSize = 10.sp)
+                        }
+                    } else {
+                        Button(
+                            onClick = { vm.stopWhatsAppLive(context) },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = StudioColors.MeterAmber,
+                            ),
+                        ) {
+                            Text("Stop · restore microphone", fontSize = 10.sp)
+                        }
+                    }
+                }
+                Text(
+                    "Scope is restricted to com.whatsapp. Start here first, then open WhatsApp and record a voice note. Stop the route before normal calls or other recording apps.",
+                    fontSize = 9.sp,
+                    color = StudioColors.TextMuted,
                 )
             }
         }
