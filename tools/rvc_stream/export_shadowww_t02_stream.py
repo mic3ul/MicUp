@@ -28,10 +28,10 @@ class TailStreamingSynth(torch.nn.Module):
         self.net = net
         self.output_frames = output_frames
 
-    def forward(self, phone, phone_lengths, pitch, nsff0, sid):
+    def forward(self, feats, p_len, pitch, pitchf, sid):
         net = self.net
         g = net.emb_g(sid).unsqueeze(-1)
-        m_p, logs_p, x_mask = net.enc_p(phone, pitch, phone_lengths)
+        m_p, logs_p, x_mask = net.enc_p(feats, pitch, p_len)
         z_p = (m_p + torch.exp(logs_p) * torch.randn_like(m_p) * 0.66666) * x_mask
         z = net.flow(z_p, x_mask, g=g, reverse=True)
         # GeneratorNSF.infer_realtime keeps the convolutional receptive field
@@ -42,7 +42,7 @@ class TailStreamingSynth(torch.nn.Module):
         if getattr(net.dec, "realtime", False):
             audio = net.dec.infer_realtime(
                 z * x_mask,
-                nsff0,
+                pitchf,
                 g=g,
                 convert_length=convert_length,
             )
@@ -53,7 +53,7 @@ class TailStreamingSynth(torch.nn.Module):
             # Keep the full context through the decoder, then retain only
             # the final fixed-duration tail. This is correct but more costly;
             # on-device latency must be measured before choosing this model.
-            audio = net.dec(z * x_mask, nsff0, g=g)[0, 0, -convert_length:]
+            audio = net.dec(z * x_mask, pitchf, g=g)[0, 0, -convert_length:]
         if audio.numel() != convert_length:
             raise RuntimeError(
                 f"Streaming generator returned {audio.numel()} samples; expected {convert_length}"
