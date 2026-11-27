@@ -67,6 +67,8 @@ class WhatsAppAudioUserService private constructor(
     @Volatile private var captureSource = MediaRecorder.AudioSource.VOICE_COMMUNICATION
     @Volatile private var droppedCaptureBlocks = 0L
     @Volatile private var droppedOutputBlocks = 0L
+    @Volatile private var captureBlocks = 0L
+    @Volatile private var captureRmsDb = -120f
     @Volatile private var targetUid = -1
 
     override fun start(targetUid: Int, sampleRate: Int): String {
@@ -122,6 +124,8 @@ class WhatsAppAudioUserService private constructor(
         running.set(true)
         droppedCaptureBlocks = 0
         droppedOutputBlocks = 0
+        captureBlocks = 0
+        captureRmsDb = -120f
         micQueue.clear()
         outputQueue.clear()
 
@@ -275,20 +279,52 @@ class WhatsAppAudioUserService private constructor(
     private fun startCaptureThread(record: AudioRecord) {
         captureThread = Thread({
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
-            val samples = ShortArray(BLOCK_SAMPLES)
+            val readBuffer = ShortArray(BLOCK_SAMPLES)
+            val outputBlock = ShortArray(BLOCK_SAMPLES)
+            var pending = 0
+            var lastMeterNs = System.nanoTime()
+            var sumSquares = 0.0
+            var squareCount = 0L
+
             while (running.get() && !Thread.currentThread().isInterrupted) {
-                val count = record.read(samples, 0, samples.size, AudioRecord.READ_BLOCKING)
+                val count = record.read(readBuffer, 0, readBuffer.size, AudioRecord.READ_BLOCKING)
                 if (count > 0) {
-                    val bytes = ByteArray(count * 2)
-                    for (i in 0 until count) {
-                        val value = samples[i].toInt()
-                        bytes[i * 2] = value.toByte()
-                        bytes[i * 2 + 1] = (value shr 8).toByte()
+                    var sourceOffset = 0
+                    while (sourceOffset < count) {
+                        val copyCount = minOf(BLOCK_SAMPLES - pending, count - sourceOffset)
+                        System.arraycopy(readBuffer, sourceOffset, outputBlock, pending, copyCount)
+                        for (i in sourceOffset until sourceOffset + copyCount) {
+                            val normalized = readBuffer[i].toDouble() / 32768.0
+                            sumSquares += normalized * normalized
+                            squareCount++
+                        }
+                        pending += copyCount
+                        sourceOffset += copyCount
+
+                        if (pending == BLOCK_SAMPLES) {
+                            val bytes = ByteArray(BLOCK_SAMPLES * 2)
+                            for (i in 0 until BLOCK_SAMPLES) {
+                                val value = outputBlock[i].toInt()
+                                bytes[i * 2] = value.toByte()
+                                bytes[i * 2 + 1] = (value shr 8).toByte()
+                            }
+                            if (!micQueue.offer(bytes)) {
+                                micQueue.poll()
+                                droppedCaptureBlocks++
+                                if (!micQueue.offer(bytes)) droppedCaptureBlocks++
+                            }
+                            pending = 0
+                        }
                     }
-                    if (!micQueue.offer(bytes)) {
-                        micQueue.poll()
-                        if (!micQueue.offer(bytes)) droppedCaptureBlocks++
-                        else droppedCaptureBlocks++
+
+                    val now = System.nanoTime()
+                    if (now - lastMeterNs >= 1_000_000_000L && squareCount > 0) {
+                        val rms = kotlin.math.sqrt(sumSquares / squareCount)
+                        captureRmsDb = if (rms <= 1e-6) -120f else (20.0 * kotlin.math.log10(rms)).toFloat()
+                        captureBlocks += squareCount / BLOCK_SAMPLES
+                        lastMeterNs = now
+                        sumSquares = 0.0
+                        squareCount = 0
                     }
                 } else if (count < 0) {
                     status = "AudioRecord.read failed: $count"
@@ -306,6 +342,7 @@ class WhatsAppAudioUserService private constructor(
         injectionThread = Thread({
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
             var noiseSeed = 0x13579b
+            val stereo = ShortArray(BLOCK_SAMPLES * 2)
             while (running.get() && !Thread.currentThread().isInterrupted) {
                 val mono = try {
                     outputQueue.poll(10, TimeUnit.MILLISECONDS)
@@ -313,7 +350,7 @@ class WhatsAppAudioUserService private constructor(
                     break
                 }
 
-                val stereo = ShortArray(BLOCK_SAMPLES * 2)
+                java.util.Arrays.fill(stereo, 0)
                 if (mono == null) {
                     // Very low level dither avoids a perfectly flat zero stream on
                     // ROMs whose recorder stops treating an all-zero source as active.
@@ -386,7 +423,8 @@ class WhatsAppAudioUserService private constructor(
 
     override fun getStatus(): String =
         "$status; micQueue=${micQueue.size}; outQueue=${outputQueue.size}; " +
-            "dropIn=$droppedCaptureBlocks; dropOut=$droppedOutputBlocks"
+            "micRms=${"%.1f".format(java.util.Locale.US, captureRmsDb)}dB; " +
+            "blocks=$captureBlocks; dropIn=$droppedCaptureBlocks; dropOut=$droppedOutputBlocks"
 
     override fun stop() {
         val token = Binder.clearCallingIdentity()
