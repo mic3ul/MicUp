@@ -60,6 +60,7 @@ class RvcOnnxConverter private constructor(
 
     data class ConvertedAudio(val samples: FloatArray, val sampleRate: Int)
 
+    val outputSampleRate: Int get() = metadata.sampleRate
     val isStreamingModel: Boolean get() = metadata.streamInputFrames > 0 && metadata.streamOutputFrames > 0
     val streamingOutputFrames: Int get() = metadata.streamOutputFrames
     val streamingStepFrames: Int get() = metadata.streamStepFrames
