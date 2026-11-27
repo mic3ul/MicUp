@@ -158,9 +158,16 @@ class WhatsAppAudioUserService(
             val intClass = Int::class.javaPrimitiveType!!
 
             val ruleBuilder = ruleBuilderClass.getConstructor().newInstance()
-            val injectorRole = ruleClass.getField("MIX_ROLE_INJECTOR").getInt(null)
-            ruleBuilderClass.getMethod("setTargetMixRole", intClass)
-                .invoke(ruleBuilder, injectorRole)
+            val roleSet = runCatching {
+                val injectorRole = ruleClass.getField("MIX_ROLE_INJECTOR").getInt(null)
+                ruleBuilderClass.getMethod("setTargetMixRole", intClass)
+                    .invoke(ruleBuilder, injectorRole)
+            }.isSuccess
+            if (!roleSet) {
+                val recorderType = mixClass.getField("MIX_TYPE_RECORDERS").getInt(null)
+                ruleBuilderClass.getMethod("setTargetMixType", intClass)
+                    .invoke(ruleBuilder, recorderType)
+            }
 
             val matchUid = ruleClass.getField("RULE_MATCH_UID").getInt(null)
             ruleBuilderClass.getMethod("addMixRule", intClass, Any::class.java)
@@ -203,11 +210,28 @@ class WhatsAppAudioUserService(
             policy = newPolicy
             mix = newMix
 
-            val track = policyClass.getMethod("createAudioTrackSource", mixClass)
-                .invoke(newPolicy, newMix) as? AudioTrack
+            val sourceTrack = runCatching {
+                policyClass.getMethod("createAudioTrackSource", mixClass)
+                    .invoke(newPolicy, newMix) as? AudioTrack
+            }.getOrNull()
+
+            val track = if (sourceTrack != null &&
+                sourceTrack.state == AudioTrack.STATE_INITIALIZED
+            ) {
+                sourceTrack
+            } else {
+                runCatching { sourceTrack?.release() }
+                // Android 14+ may reject the hidden AudioPolicy factory because
+                // it builds AudioTrack without a Context. The documented shell
+                // injector fallback binds the track explicitly to this UserService
+                // Context and the registered mix address.
+                createManualInjectionTrack(ctx, newMix)
+            }
+
             if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
                 runCatching { track?.release() }
-                status = "AudioPolicy created an uninitialised injection track"
+                status = "Could not create an initialized AudioPolicy injection track: " +
+                    (lastTrackError ?: "AudioPolicy source and Context-bound fallback both failed")
                 return false
             }
             injectionTrack = track
@@ -218,6 +242,82 @@ class WhatsAppAudioUserService(
             status = "AudioPolicy setup failed: ${root.javaClass.simpleName}: ${root.message}"
             Log.e(TAG, status, error)
             return false
+        }
+    }
+
+    @Volatile private var lastTrackError: String? = null
+
+    private fun createManualInjectionTrack(ctx: Context, audioMix: Any): AudioTrack? {
+        return try {
+            // The hidden VMRuntime exemption is scoped to this Shizuku shell
+            // process only. It is needed for AudioMix.getRegistration().
+            runCatching {
+                val vmRuntime = Class.forName("dalvik.system.VMRuntime")
+                val runtime = vmRuntime.getMethod("getRuntime").invoke(null)
+                vmRuntime.getMethod("setHiddenApiExemptions", Array<String>::class.java)
+                    .invoke(runtime, arrayOf("L"))
+            }
+
+            val registration = audioMix.javaClass.getMethod("getRegistration")
+                .invoke(audioMix) as? String
+                ?: error("AudioMix registration is null")
+            require(registration.isNotBlank()) { "AudioMix registration is empty" }
+
+            val mixFormat = audioMix.javaClass.getMethod("getFormat")
+                .invoke(audioMix) as AudioFormat
+            val outputMask = if (mixFormat.channelCount == 1) {
+                AudioFormat.CHANNEL_OUT_MONO
+            } else {
+                AudioFormat.CHANNEL_OUT_STEREO
+            }
+            val trackFormat = AudioFormat.Builder()
+                .setSampleRate(mixFormat.sampleRate)
+                .setChannelMask(outputMask)
+                .setEncoding(mixFormat.encoding)
+                .build()
+
+            val virtualSourceUsage = AudioAttributes::class.java
+                .getField("USAGE_VIRTUAL_SOURCE").getInt(null)
+            val attributesBuilder = AudioAttributes.Builder()
+                .setUsage(virtualSourceUsage)
+            AudioAttributes.Builder::class.java
+                .getMethod("addTag", String::class.java)
+                .invoke(attributesBuilder, if (registration.startsWith("addr=")) registration else "addr=$registration")
+
+            val minBuffer = AudioTrack.getMinBufferSize(
+                trackFormat.sampleRate,
+                outputMask,
+                trackFormat.encoding,
+            )
+            require(minBuffer > 0) { "AudioTrack minimum buffer size failed: $minBuffer" }
+            val bytesPerSample = when (trackFormat.encoding) {
+                AudioFormat.ENCODING_PCM_FLOAT -> 4
+                else -> 2
+            }
+            val channelCount = if (outputMask == AudioFormat.CHANNEL_OUT_MONO) 1 else 2
+            val safeBuffer = maxOf(
+                minBuffer,
+                trackFormat.sampleRate / 100 * channelCount * bytesPerSample * 2,
+            )
+
+            val builder = AudioTrack.Builder()
+                .setAudioAttributes(attributesBuilder.build())
+                .setAudioFormat(trackFormat)
+                .setBufferSizeInBytes(safeBuffer)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+
+            AudioTrack.Builder::class.java
+                .getMethod("setContext", Context::class.java)
+                .invoke(builder, ctx)
+
+            (builder.build() as AudioTrack).takeIf {
+                it.state == AudioTrack.STATE_INITIALIZED
+            }
+        } catch (error: Throwable) {
+            lastTrackError = "${error.cause?.message ?: error.message ?: error.javaClass.simpleName}"
+            Log.w(TAG, "Context-bound AudioTrack fallback failed: $lastTrackError", error)
+            null
         }
     }
 
