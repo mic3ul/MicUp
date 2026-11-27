@@ -1,6 +1,8 @@
 package com.micplugin.inject
 
+import android.content.AttributionSource
 import android.content.Context
+import android.content.ContextWrapper
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
@@ -50,6 +52,7 @@ class WhatsAppAudioUserService(
     private val outputQueue = ArrayBlockingQueue<ShortArray>(MAX_OUTPUT_QUEUE_BLOCKS)
 
     @Volatile private var context: Context? = appContext?.applicationContext
+    @Volatile private var shellContext: Context? = null
     @Volatile private var audioManager: AudioManager? = null
     @Volatile private var policy: Any? = null
     @Volatile private var mix: Any? = null
@@ -105,10 +108,16 @@ class WhatsAppAudioUserService(
         }
 
         targetUid = uid
-        audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            ?: return "ERROR: AudioManager unavailable"
+        val systemContext = ShellContext(ctx)
+        shellContext = systemContext
+        audioManager = runCatching {
+            AudioManager::class.java.getConstructor(Context::class.java)
+                .newInstance(systemContext)
+        }.getOrElse {
+            systemContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        } ?: return "ERROR: AudioManager unavailable"
 
-        val policyReady = registerWhatsAppOnlyPolicy(ctx, uid)
+        val policyReady = registerWhatsAppOnlyPolicy(systemContext, uid)
         if (!policyReady) {
             stopInternal()
             return "ERROR: $status"
@@ -342,7 +351,12 @@ class WhatsAppAudioUserService(
                         .build()
                 )
                 .setBufferSizeInBytes(bytes)
+            if (Build.VERSION.SDK_INT >= 31) {
+                runCatching { builder.setContext(shellContext ?: ctx) }
+            }
             if (Build.VERSION.SDK_INT >= 30) {
+                // Keep shell capture non-privacy-sensitive so a foreground
+                // WhatsApp PTT session does not automatically silence it.
                 runCatching { builder.setPrivacySensitive(false) }
             }
             builder.build().takeIf { it.state == AudioRecord.STATE_INITIALIZED }
@@ -635,9 +649,29 @@ class WhatsAppAudioUserService(
         runCatching { policyHandlerThread?.quitSafely() }
         policyHandlerThread = null
         audioManager = null
+        shellContext = null
         targetUid = -1
         status = "stopped"
         Log.i(TAG, "WhatsApp injection stopped; true microphone restored")
+    }
+
+    private class ShellContext(base: Context) : ContextWrapper(base) {
+        private val isShell = Process.myUid() == 2000
+
+        override fun getPackageName(): String =
+            if (isShell) "com.android.shell" else super.getPackageName()
+
+        override fun getOpPackageName(): String =
+            if (isShell) "com.android.shell" else super.getOpPackageName()
+
+        override fun getAttributionSource(): AttributionSource {
+            if (!isShell || Build.VERSION.SDK_INT < 31) return super.getAttributionSource()
+            return AttributionSource.Builder(Process.myUid())
+                .setPackageName("com.android.shell")
+                .build()
+        }
+
+        override fun getApplicationContext(): Context = this
     }
 
     override fun exit() {
