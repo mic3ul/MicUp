@@ -1,0 +1,141 @@
+name: Build WEIRDO Live RVC Model
+
+on:
+  push:
+    branches:
+      - work/rvc-stream-conversion
+    paths:
+      - "tools/rvc_stream/**"
+      - ".github/workflows/build-rvc-live-model.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout WEIRDO
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install CPU export dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy==1.26.4 onnx==1.16.2 huggingface_hub==0.27.1
+          python -m pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Fetch upstream RVC architecture source
+        run: |
+          git clone --depth 1 https://github.com/w-okada/voice-changer.git "$RUNNER_TEMP/voice-changer"
+          test -f "$RUNNER_TEMP/voice-changer/LICENSE"
+          grep -q "MIT License" "$RUNNER_TEMP/voice-changer/LICENSE"
+
+      - name: Download T02 voice and MIT RVC base models
+        run: |
+          mkdir -p artifacts/rvc-live/input
+          python - <<'PY'
+          from huggingface_hub import hf_hub_download
+          from pathlib import Path
+          import shutil
+
+          out = Path("artifacts/rvc-live/input")
+          files = [
+              ("ShadowSH2306/shadowww-voices", "t02/shadowww-t02.zip", "shadowww-t02.zip"),
+              ("TigreGotico/voiceclonnx-rvc", "contentvec_768l12_q8.onnx", "contentvec_768l12_q8.onnx"),
+              ("TigreGotico/voiceclonnx-rvc", "rmvpe_q8.onnx", "rmvpe_q8.onnx"),
+          ]
+          for repo, remote_name, local_name in files:
+              source = hf_hub_download(repo_id=repo, filename=remote_name)
+              shutil.copy2(source, out / local_name)
+              print(f"Fetched {repo}/{remote_name}: {(out / local_name).stat().st_size} bytes")
+          PY
+
+      - name: Export and validate RVC stream synthesizers
+        run: |
+          python tools/rvc_stream/export_shadowww_t02_stream.py \
+            --voice-zip artifacts/rvc-live/input/shadowww-t02.zip \
+            --voice-changer-server "$RUNNER_TEMP/voice-changer/server" \
+            --output-dir artifacts/rvc-live/models
+
+      - name: Check ONNX model interfaces and sizes
+        run: |
+          python - <<'PY'
+          import onnx
+          from pathlib import Path
+          base = Path("artifacts/rvc-live/models")
+          expected = {
+              "shadowww_t02_stream_300ms.onnx": (35, 16800),
+              "shadowww_t02_stream_500ms.onnx": (55, 26400),
+          }
+          for name, (frames, samples) in expected.items():
+              path = base / name
+              model = onnx.load(str(path))
+              onnx.checker.check_model(model)
+              inputs = {x.name for x in model.graph.input}
+              outputs = {x.name for x in model.graph.output}
+              assert {"feats", "p_len", "pitch", "pitchf", "sid"} <= inputs, (name, inputs)
+              assert "audio" in outputs, (name, outputs)
+              meta = {p.key: p.value for p in model.metadata_props}
+              assert '"streaming": true' in meta.get("metadata", ""), meta
+              assert f'"streamOutputFrames": {frames}' in meta["metadata"], meta
+              size = path.stat().st_size
+              assert size > 1024 * 1024, f"{name} unexpectedly small: {size}"
+              print(f"PASS {name}: {size / 1024 / 1024:.1f} MiB")
+          for name in ("contentvec_768l12_q8.onnx", "rmvpe_q8.onnx"):
+              path = Path("artifacts/rvc-live/input") / name
+              assert path.exists() and path.stat().st_size > 10 * 1024 * 1024, name
+              onnx.checker.check_model(onnx.load(str(path)))
+              print(f"PASS {name}: {path.stat().st_size / 1024 / 1024:.1f} MiB")
+          PY
+
+      - name: Add model provenance, licenses and checksums
+        run: |
+          cp "$RUNNER_TEMP/voice-changer/LICENSE" artifacts/rvc-live/VOICE_CHANGER_MIT_LICENSE.txt
+          curl -fL https://raw.githubusercontent.com/TigreGotico/voiceclonnx/dev/LICENSE \
+            -o artifacts/rvc-live/BASE_MODELS_MIT_LICENSE.txt
+          cp artifacts/rvc-live/models/ATTRIBUTION.txt artifacts/rvc-live/ATTRIBUTION.txt
+          cat > artifacts/rvc-live/README.txt <<'EOF'
+          WEIRDO LIVE RVC — SHADOWWW T02 RAW
+
+          Voice model: Shadowww
+          Source: https://huggingface.co/ShadowSH2306/shadowww-voices
+          License: CC BY-NC 4.0
+          Required credit: Voice model: Shadowww
+
+          Non-commercial use only unless separate permission is obtained from Shadowww.
+          Do not impersonate Shadowww. Label AI-generated vocals as AI.
+          Upstream pretrained base credit: KLM 4.1 48k by SeungHyun Han
+          (Seoul Streaming Station).
+
+          Two fixed-window streaming synthesizers:
+          - 300 ms stride: 1 second context, 350 ms output tail, 50 ms crossfade.
+          - 500 ms stride: 1 second context, 550 ms output tail, 50 ms crossfade.
+
+          Shared MIT-licensed base models:
+          - ContentVec-768 INT8
+          - RMVPE INT8
+
+          The Shadowww voice weights are non-commercial and are not licensed for
+          commercial redistribution. Keep ATTRIBUTION.txt and both license files
+          with the model bundle. Performance is device-dependent and has not yet
+          been measured on the HONOR X5b.
+          EOF
+          find artifacts/rvc-live -type f -not -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > artifacts/rvc-live/SHA256SUMS
+          cd artifacts && zip -r -9 ../weirdo-live-rvc-shadowww-t02.zip rvc-live
+
+      - name: Upload WEIRDO Live RVC bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: weirdo-live-rvc-shadowww-t02
+          path: |
+            weirdo-live-rvc-shadowww-t02.zip
+            artifacts/rvc-live/**
+          if-no-files-found: error
+          retention-days: 30
