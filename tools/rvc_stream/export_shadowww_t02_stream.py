@@ -39,13 +39,21 @@ class TailStreamingSynth(torch.nn.Module):
         # Cropping z before the decoder would discard that receptive field and
         # create an audible boundary at every 300/500 ms update.
         convert_length = self.output_frames * (SAMPLE_RATE // 100)
-        audio = net.dec.infer_realtime(
-            z * x_mask,
-            nsff0,
-            g=g,
-            convert_length=convert_length,
-        )
-        audio = audio[0, 0]
+        if getattr(net.dec, "realtime", False):
+            audio = net.dec.infer_realtime(
+                z * x_mask,
+                nsff0,
+                g=g,
+                convert_length=convert_length,
+            )
+            audio = audio[0, 0]
+        else:
+            # Some RVC-v2 checkpoints use ResBlock1, for which upstream
+            # GeneratorNSF disables its optimized infer_realtime path.
+            # Keep the full context through the decoder, then retain only
+            # the final fixed-duration tail. This is correct but more costly;
+            # on-device latency must be measured before choosing this model.
+            audio = net.dec(z * x_mask, nsff0, g=g)[0, 0, -convert_length:]
         if audio.numel() != convert_length:
             raise RuntimeError(
                 f"Streaming generator returned {audio.numel()} samples; expected {convert_length}"
@@ -126,6 +134,9 @@ def main() -> None:
             "Required RVC weights are missing: " + ", ".join(bad_missing[:20])
         )
     print(f"Loaded checkpoint: {checkpoint_path.name}")
+    print(f"RVC decoder realtime optimisation: {getattr(net.dec, 'realtime', False)}")
+    if not getattr(net.dec, "realtime", False):
+        print("WARNING: this RVC checkpoint will decode the full one-second window before tail cropping; measured mobile latency may be too high.")
     print(
         f"Missing non-core keys: {len(load_result.missing_keys)}; "
         f"unexpected keys: {len(load_result.unexpected_keys)}"
