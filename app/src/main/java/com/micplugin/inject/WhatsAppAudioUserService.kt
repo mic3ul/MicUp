@@ -158,6 +158,16 @@ class WhatsAppAudioUserService(
 
     private fun registerWhatsAppOnlyPolicy(ctx: Context, uid: Int): Boolean {
         try {
+            // AudioPolicy and AudioMix are @SystemApi. Shizuku runs this
+            // service under shell UID; exempt hidden API lookup in this shell
+            // process only, before resolving the policy classes.
+            runCatching {
+                val vmRuntime = Class.forName("dalvik.system.VMRuntime")
+                val runtime = vmRuntime.getMethod("getRuntime").invoke(null)
+                vmRuntime.getMethod("setHiddenApiExemptions", Array<String>::class.java)
+                    .invoke(runtime, arrayOf("L"))
+            }
+
             val ruleClass = Class.forName("android.media.audiopolicy.AudioMixingRule")
             val ruleBuilderClass = Class.forName("android.media.audiopolicy.AudioMixingRule\$Builder")
             val mixClass = Class.forName("android.media.audiopolicy.AudioMix")
