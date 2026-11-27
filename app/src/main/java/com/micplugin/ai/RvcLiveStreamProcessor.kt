@@ -161,10 +161,10 @@ class RvcLiveStreamProcessor(
             try {
                 val converted = converter.convert(window, INPUT_SAMPLE_RATE)
                 require(converted.sampleRate == outputSampleRate) {
-                    "RVC returned \${converted.sampleRate} Hz, expected $outputSampleRate Hz."
+                    "RVC returned ${converted.sampleRate} Hz, expected $outputSampleRate Hz."
                 }
                 require(converted.samples.size == outputSamples) {
-                    "RVC returned \${converted.samples.size} samples; model metadata requires $outputSamples."
+                    "RVC returned ${converted.samples.size} samples; model metadata requires $outputSamples."
                 }
                 val output = crossfader.emit(converted.samples)
                 onOutput(output)
