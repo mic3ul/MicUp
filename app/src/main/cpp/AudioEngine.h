@@ -158,6 +158,11 @@ public:
     ~AudioEngine();
 
     bool start();
+    // External microphone mode: the app supplies mono PCM from an authorized
+    // system-level source (e.g. the WhatsApp-only Shizuku injector). No Oboe
+    // capture stream is opened in this mode.
+    bool startExternal();
+    void processExternal(float* samples, int32_t frames);
     void stop();
     bool isRunning() const { return running_.load(std::memory_order_relaxed); }
 
