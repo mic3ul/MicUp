@@ -54,6 +54,29 @@ class AudioEngine @Inject constructor(
         return ok
     }
 
+    /**
+     * Starts the same DSP chain without opening Oboe's own microphone input.
+     * External microphone PCM is supplied by the WhatsApp-only Shizuku route.
+     */
+    fun startExternal(): Boolean {
+        val ok = oboe.startExternal()
+        if (ok) {
+            _status.value = EngineStatus(
+                isRunning = true,
+                sampleRate = 48000,
+                framesPerBurst = 960,
+                latencyMs = 20f,
+            )
+            startMeterPolling()
+            Log.i(TAG, "Engine started in external PCM mode at 48000Hz")
+        }
+        return ok
+    }
+
+    fun processExternalPcm(samples: FloatArray) {
+        if (_status.value.isRunning && samples.isNotEmpty()) oboe.processExternalPcm(samples)
+    }
+
     fun stop() {
         meterJob?.cancel()
         oboe.stop()
