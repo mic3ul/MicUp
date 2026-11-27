@@ -40,6 +40,7 @@ class RvcLiveStreamProcessor(
     }
 
     private val running = AtomicBoolean(false)
+    private val crossfadeDiscontinuity = AtomicBoolean(false)
     private val lock = Any()
     private val ring = FloatArray(MIN_WINDOW_SAMPLES)
     private var writeIndex = 0
@@ -94,6 +95,7 @@ class RvcLiveStreamProcessor(
             pendingWindow = null
             workerActive = false
             crossfader.reset()
+            crossfadeDiscontinuity.set(false)
             ring.fill(0f)
         }
         publishStats(ready = false)
@@ -136,7 +138,10 @@ class RvcLiveStreamProcessor(
     private fun queueSnapshot(window: FloatArray) {
         var startWorker = false
         synchronized(lock) {
-            if (pendingWindow != null) skippedWindows.incrementAndGet()
+            if (pendingWindow != null) {
+                skippedWindows.incrementAndGet()
+                crossfadeDiscontinuity.set(true)
+            }
             pendingWindow = window
             if (!workerActive) {
                 workerActive = true
@@ -166,6 +171,11 @@ class RvcLiveStreamProcessor(
                 require(converted.samples.size == outputSamples) {
                     "RVC returned ${converted.samples.size} samples; model metadata requires $outputSamples."
                 }
+                if (crossfadeDiscontinuity.getAndSet(false)) {
+                    // The worker skipped one or more chronological windows;
+                    // do not crossfade across a non-adjacent audio interval.
+                    crossfader.reset()
+                }
                 val output = crossfader.emit(converted.samples)
                 onOutput(output)
                 val elapsed = (System.nanoTime() - startedAt) / 1_000_000L
@@ -175,8 +185,10 @@ class RvcLiveStreamProcessor(
                 lastError = null
                 publishStats(ready = true)
             } catch (error: Throwable) {
+                crossfader.reset()
+                crossfadeDiscontinuity.set(true)
                 lastError = error.message ?: error.javaClass.simpleName
-                publishStats(ready = previousTail != null)
+                publishStats(ready = false)
             }
         }
         synchronized(lock) { workerActive = false }
@@ -204,6 +216,7 @@ class RvcLiveStreamProcessor(
         synchronized(lock) {
             pendingWindow = null
             crossfader.reset()
+            crossfadeDiscontinuity.set(false)
             ring.fill(0f)
         }
         // Let an in-flight ONNX call leave its worker before the owner closes
