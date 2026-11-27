@@ -382,7 +382,13 @@ class WhatsAppAudioUserService(
             result = build(MediaRecorder.AudioSource.MIC)
             captureSource = MediaRecorder.AudioSource.MIC
         }
-        if (result == null) status = "Both VOICE_COMMUNICATION and MIC AudioRecord paths failed"
+        if (result == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            result = build(MediaRecorder.AudioSource.VOICE_PERFORMANCE)
+            captureSource = MediaRecorder.AudioSource.VOICE_PERFORMANCE
+        }
+        if (result == null) {
+            status = "AudioRecord failed for VOICE_COMMUNICATION, MIC and VOICE_PERFORMANCE sources"
+        }
         return result
     }
 
