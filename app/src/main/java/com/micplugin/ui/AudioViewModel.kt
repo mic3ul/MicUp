@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.micplugin.audio.AudioEngine
 import com.micplugin.audio.AudioLevels
+import com.micplugin.inject.WhatsAppLiveState
 import com.micplugin.plugin.*
 import com.micplugin.preset.EffectState
 import com.micplugin.preset.Preset
@@ -98,6 +99,8 @@ class AudioViewModel @Inject constructor(
     val presets:     StateFlow<List<Preset>>   = presetManager.presets
     val virtualMicTier: StateFlow<VirtualMicTier> = virtualMicService.activeTier
     val shizukuState: StateFlow<ShizukuState> = shizukuManager.state
+    val whatsAppLiveState: StateFlow<String> = WhatsAppLiveState.message
+    val whatsAppLiveActive: StateFlow<Boolean> = WhatsAppLiveState.active
 
     private val _gateState   = MutableStateFlow(GateState())
     private val _eqState     = MutableStateFlow(EqState())
@@ -497,6 +500,14 @@ class AudioViewModel @Inject constructor(
     fun rescan() { viewModelScope.launch { pluginManager.scanAll() } }
 
     fun requestShizukuPermission() { shizukuManager.requestPermission() }
+
+    fun startWhatsAppLive(context: Context) {
+        com.micplugin.service.AudioProcessingService.startWhatsAppLive(context)
+    }
+
+    fun stopWhatsAppLive(context: Context) {
+        com.micplugin.service.AudioProcessingService.stopWhatsAppLive(context)
+    }
 
     /** Returns null if available, or a reason string if not. */
     fun checkTierAvailability(tier: com.micplugin.service.VirtualMicTier): String? =
