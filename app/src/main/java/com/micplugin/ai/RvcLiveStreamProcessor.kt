@@ -241,10 +241,20 @@ class RvcLiveStreamProcessor(
         running.set(false)
         synchronized(lock) {
             pendingWindow = null
-            workerActive = false
             previousTail = null
             ring.fill(0f)
         }
-        executor.shutdownNow()
+        // Let an in-flight ONNX call leave its worker before the owner closes
+        // the three sessions. This prevents use-after-close during route stop.
+        executor.shutdown()
+        try {
+            if (!executor.awaitTermination(2, java.util.concurrent.TimeUnit.SECONDS)) {
+                executor.shutdownNow()
+                executor.awaitTermination(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+        } catch (_: InterruptedException) {
+            executor.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
     }
 }
